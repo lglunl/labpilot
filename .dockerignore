@@ -1,0 +1,22 @@
+# 运行数据、二进制、日志都不进镜像
+.workbuddy
+node_modules
+.env
+.git
+.gitignore
+
+# 宿主机专用的启动/守护脚本
+scripts
+start.cmd
+show-link.cmd
+docker-*.cmd
+CURRENT_URL.txt
+
+# 文档
+docs
+*.md
+
+# 杂项
+*.log
+.DS_Store
+Thumbs.db

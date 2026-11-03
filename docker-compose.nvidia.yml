@@ -1,0 +1,21 @@
+# NVIDIA 显卡加速（可选叠加文件）
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d --build
+#
+# 前提：
+#   1. 宿主机有 NVIDIA 显卡（GTX 10 系及以上）
+#   2. Windows 上装了最新驱动 + Docker Desktop 并启用 WSL2 后端
+#   3. 验证：docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+#
+# 注意：AMD / Intel 核显无法通过这种方式直通，请改用 docker-compose.host-ollama.yml。
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

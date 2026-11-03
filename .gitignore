@@ -1,0 +1,19 @@
+# 运行数据（含 cloudflared / ngrok 二进制、日志、锁文件）
+.workbuddy/
+
+# 依赖（本项目零依赖，通常不存在）
+node_modules/
+
+# 本地配置与密钥
+.env
+
+# 运行时生成的当前地址
+CURRENT_URL.txt
+
+# 日志
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini

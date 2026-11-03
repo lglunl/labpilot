@@ -1,0 +1,15 @@
+{
+  "name": "labpilot-live",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "LabPilot 智研台 —— 静态前端 + 本地 Ollama 摘要服务",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "dev": "node --env-file-if-exists=.env server/index.js",
+    "health": "node -e \"fetch('http://127.0.0.1:8080/api/health').then(r=>r.json()).then(d=>console.log(JSON.stringify(d,null,2)))\""
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

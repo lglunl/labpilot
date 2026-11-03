@@ -1,0 +1,46 @@
+# LabPilot —— 用宿主机已有的 Ollama（推荐在 AMD 核显 / 无独显的 Windows 机器上用）
+#
+# 为什么需要这个方案：
+#   Docker Desktop on Windows 基于 WSL2，只能把 NVIDIA 显卡直通进容器。
+#   AMD / Intel 核显的 Vulkan 加速无法透传给容器，容器里的 Ollama 只能跑纯 CPU，
+#   比宿主机原生慢 3~5 倍。所以如果你已经在宿主机装好了 Ollama 并开了核显加速，
+#   就用这个文件，让容器只跑 Web 服务。
+#
+# 用法：
+#   1. 宿主机先装好 Ollama，并确认它监听 0.0.0.0（默认只监听 127.0.0.1，容器连不上）
+#      Windows PowerShell（管理员）：
+#        [Environment]::SetEnvironmentVariable('OLLAMA_HOST','0.0.0.0:11434','User')
+#      然后重启 Ollama。
+#   2. docker compose -f docker-compose.host-ollama.yml up -d --build
+
+services:
+  app:
+    build: .
+    image: labpilot-app:latest
+    container_name: labpilot-app
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      # 指向宿主机，而不是容器名
+      OLLAMA_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct-q4_K_M}
+      OLLAMA_NUM_CTX: "8192"
+      OLLAMA_NUM_PREDICT: "600"
+      OLLAMA_TIMEOUT_MS: "150000"
+      OLLAMA_KEEP_ALIVE: 30m
+      MAX_QUEUE: "3"
+      CACHE_TTL_MS: "600000"
+    # Linux 上 host.docker.internal 需要显式声明；Docker Desktop 自带，但写了也无害
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: labpilot-tunnel
+    command: tunnel --no-autoupdate --url http://app:8080
+    depends_on:
+      - app
+    restart: unless-stopped
