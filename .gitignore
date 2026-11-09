@@ -13,6 +13,11 @@ CURRENT_URL.txt
 # 日志
 *.log
 
+# 文档 / 视频制作的中间产物与成片，不属于站点源码
+output/
+video/
+deliverables/
+
 # 系统
 .DS_Store
 Thumbs.db
