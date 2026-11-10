@@ -7,6 +7,9 @@ import { buildChatMessages } from './prompt.js';
 import { SUMMARY_SCHEMA, normalizeSummary, isUsableSummary } from './schema.js';
 import { ruleSummary } from './fallback.js';
 import { createStaticHandler } from './static.js';
+import { openDatabase, createApi } from './db.js';
+
+const dbApi = createApi(openDatabase());
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(HERE, '..');
@@ -14,14 +17,14 @@ const PROJECT_ROOT = path.resolve(HERE, '..');
 const CONFIG = {
   port: Number(process.env.PORT || 8080),
   host: process.env.HOST || '127.0.0.1',
-  ollamaUrl: (process.env.OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/$/, ''),
-  model: process.env.OLLAMA_MODEL || 'qwen2.5:7b-instruct-q4_K_M',
-  timeoutMs: Number(process.env.OLLAMA_TIMEOUT_MS || 150_000),
-  numCtx: Number(process.env.OLLAMA_NUM_CTX || 8192),
-  numPredict: Number(process.env.OLLAMA_NUM_PREDICT || 600),
+  llmBaseUrl: (process.env.LLM_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, ''),
+  llmApiKey: process.env.LLM_API_KEY || process.env.DEEPSEEK_API_KEY || '',
+  model: process.env.LLM_MODEL || 'deepseek-chat',
+  timeoutMs: Number(process.env.LLM_TIMEOUT_MS || 60_000),
+  maxTokens: Number(process.env.LLM_MAX_TOKENS || 800),
   maxQueue: Number(process.env.MAX_QUEUE || 3),
-  keepAlive: process.env.OLLAMA_KEEP_ALIVE || '30m',
   cacheTtlMs: Number(process.env.CACHE_TTL_MS || 10 * 60_000),
+  apiToken: process.env.LAB_API_TOKEN || '',
 };
 
 const log = (level, message, extra = '') => {
@@ -63,39 +66,34 @@ function writeCache(key, payload) {
   cache.set(key, { at: Date.now(), payload });
 }
 
-/* ---------- 调用 Ollama ---------- */
-async function callOllama({ messages, instruments }) {
-  const expectsThinking = /qwen3|deepseek-r1|gpt-oss/i.test(CONFIG.model);
-  const body = {
-    model: CONFIG.model,
-    messages: buildChatMessages({ messages, instruments }),
-    stream: false,
-    format: SUMMARY_SCHEMA,
-    keep_alive: CONFIG.keepAlive,
-    options: {
-      temperature: 0,
-      top_p: 0.9,
-      num_ctx: CONFIG.numCtx,
-      num_predict: CONFIG.numPredict,
-    },
-  };
-  if (expectsThinking) body.think = false;
+/* ---------- 调用 DeepSeek（OpenAI 兼容接口） ---------- */
+async function callLLM({ messages, instruments }) {
+  if (!CONFIG.llmApiKey) throw new Error('未配置 LLM_API_KEY');
 
-  const response = await fetch(`${CONFIG.ollamaUrl}/api/chat`, {
+  const response = await fetch(`${CONFIG.llmBaseUrl}/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${CONFIG.llmApiKey}`,
+    },
+    body: JSON.stringify({
+      model: CONFIG.model,
+      messages: buildChatMessages({ messages, instruments }),
+      temperature: 0,
+      max_tokens: CONFIG.maxTokens,
+      response_format: { type: 'json_object' },
+    }),
     signal: AbortSignal.timeout(CONFIG.timeoutMs),
   });
 
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
-    throw new Error(`Ollama ${response.status}: ${detail.slice(0, 200)}`);
+    throw new Error(`LLM ${response.status}: ${detail.slice(0, 200)}`);
   }
 
   const data = await response.json();
-  const content = data?.message?.content;
-  if (!content) throw new Error('Ollama 返回内容为空');
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new Error('LLM 返回内容为空');
 
   let parsed;
   try {
@@ -109,8 +107,8 @@ async function callOllama({ messages, instruments }) {
 
   return {
     summary: parsed,
-    tokens: data.eval_count || 0,
-    durationMs: Math.round((data.total_duration || 0) / 1e6),
+    tokens: data?.usage?.total_tokens || 0,
+    durationMs: 0,
   };
 }
 
@@ -166,7 +164,7 @@ async function handleSummarize(body) {
   }
 
   try {
-    const result = await enqueue(() => callOllama({ messages, instruments }));
+    const result = await enqueue(() => callLLM({ messages, instruments }));
     const summary = normalizeSummary(result.summary, { messages, instruments });
 
     if (!isUsableSummary(summary)) {
@@ -177,7 +175,7 @@ async function handleSummarize(body) {
     const payload = {
       summary,
       meta: {
-        source: 'local',
+        source: 'deepseek',
         model: CONFIG.model,
         latencyMs: Date.now() - startedAt,
         modelMs: result.durationMs,
@@ -221,6 +219,26 @@ function readJsonBody(req, limit = 4 * 1024 * 1024) {
   });
 }
 
+// 数据接口鉴权：设置了 LAB_API_TOKEN 时，请求需带 Authorization: Bearer <token>。
+// 未设置 token 时放行，方便本机联调。
+function authorize(req) {
+  if (!CONFIG.apiToken) return true;
+  const header = req.headers.authorization || '';
+  return header === `Bearer ${CONFIG.apiToken}`;
+}
+
+function todayKey() {
+  const date = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function nowTime() {
+  const date = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function sendJson(res, status, payload) {
   const text = JSON.stringify(payload);
   res.writeHead(status, {
@@ -236,25 +254,91 @@ const server = http.createServer(async (req, res) => {
   const pathname = url.pathname;
 
   if (pathname === '/api/health') {
-    let ollama = 'down';
-    let models = [];
-    try {
-      const response = await fetch(`${CONFIG.ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(3000) });
-      const data = await response.json();
-      models = (data.models || []).map((m) => m.name);
-      ollama = 'up';
-    } catch {
-      ollama = 'down';
-    }
     return sendJson(res, 200, {
-      ok: ollama === 'up',
-      ollama,
+      ok: true,
+      llm: CONFIG.llmApiKey ? 'configured' : 'missing_key',
+      provider: CONFIG.llmBaseUrl,
       model: CONFIG.model,
-      modelLoaded: models.includes(CONFIG.model),
-      models,
       queueDepth,
       cacheSize: cache.size,
     });
+  }
+
+  // ---------- 预约数据接口（供扫码 agent 与本机前端调用） ----------
+  if (pathname.startsWith('/api/users') || pathname.startsWith('/api/bookings') || pathname === '/api/instruments') {
+    if (!authorize(req)) return sendJson(res, 401, { error: '未授权' });
+
+    if (pathname === '/api/instruments' && req.method === 'GET') {
+      return sendJson(res, 200, { instruments: dbApi.instruments });
+    }
+
+    if (pathname === '/api/users/verify' && req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.authenticate(body?.name, body?.password);
+      if (!result.ok) {
+        const message = result.reason === 'bad_password' ? '密码不正确' : '该用户未注册';
+        return sendJson(res, 200, { ok: false, reason: result.reason, message });
+      }
+      return sendJson(res, 200, { ok: true, user: result.user });
+    }
+
+    if (pathname === '/api/bookings/active' && req.method === 'GET') {
+      const instrumentId = url.searchParams.get('instrument') || '';
+      const applicant = url.searchParams.get('user') || '';
+      const date = url.searchParams.get('date') || todayKey();
+      const time = url.searchParams.get('time') || nowTime();
+      if (!instrumentId || !applicant) return sendJson(res, 400, { error: '缺少 instrument 或 user' });
+      const booking = dbApi.activeBooking({ instrumentId, applicant, date, time });
+      return sendJson(res, 200, { ok: Boolean(booking), booking });
+    }
+
+    const instrumentMatch = pathname.match(/^\/api\/bookings\/instrument\/([^/]+)$/);
+    if (instrumentMatch && req.method === 'GET') {
+      const instrumentId = decodeURIComponent(instrumentMatch[1]);
+      return sendJson(res, 200, { bookings: dbApi.bookingsForInstrument(instrumentId) });
+    }
+
+    const cancelMatch = pathname.match(/^\/api\/bookings\/([^/]+)\/cancel$/);
+    if (cancelMatch && req.method === 'POST') {
+      const result = dbApi.cancelBooking(decodeURIComponent(cancelMatch[1]));
+      if (!result.ok) {
+        const message = result.reason === 'already_checked_in' ? '已上机的预约不能取消' : '预约不存在';
+        return sendJson(res, 400, { ok: false, reason: result.reason, message });
+      }
+      return sendJson(res, 200, { ok: true, booking: result.booking });
+    }
+
+    const scanMatch = pathname.match(/^\/api\/bookings\/([^/]+)\/scan$/);
+    if (scanMatch && req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const action = body?.action;
+      if (action !== 'check-in' && action !== 'check-out') {
+        return sendJson(res, 400, { error: 'action 必须是 check-in 或 check-out' });
+      }
+      const result = dbApi.recordScan(decodeURIComponent(scanMatch[1]), action, body?.at);
+      if (!result.ok) {
+        const message = result.reason === 'not_checked_in' ? '尚未上机，不能下机' : '预约不存在';
+        return sendJson(res, 404, { ok: false, reason: result.reason, message });
+      }
+      return sendJson(res, 200, { ok: true, booking: result.booking });
+    }
+
+    if (pathname === '/api/bookings' && req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const { instrumentId, applicant, purpose, date, start, end } = body || {};
+      if (!instrumentId || !applicant || !date || !start || !end) {
+        return sendJson(res, 400, { error: '缺少必填字段' });
+      }
+      const result = dbApi.createBooking({ instrumentId, applicant, purpose, date, start, end });
+      if (!result.ok) {
+        const message = result.reason === 'applicant_not_registered' ? '申请人未注册' : '未知仪器';
+        return sendJson(res, 400, { ok: false, reason: result.reason, message });
+      }
+      return sendJson(res, 201, { ok: true, booking: result.booking });
+    }
   }
 
   if (pathname === '/api/agent/summarize') {
@@ -328,16 +412,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CONFIG.port, CONFIG.host, () => {
   log('info', `LabPilot 已启动 http://${CONFIG.host}:${CONFIG.port}`);
-  log('info', '模型配置', `model=${CONFIG.model} ollama=${CONFIG.ollamaUrl} timeout=${CONFIG.timeoutMs}ms`);
-
-  if (process.env.PREWARM === '1') {
-    log('info', '预热模型…');
-    fetch(`${CONFIG.ollamaUrl}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: CONFIG.model, prompt: '就绪', stream: false, options: { num_predict: 4 }, keep_alive: CONFIG.keepAlive }),
-    }).then(() => log('info', '模型预热完成')).catch((e) => log('warn', '预热失败', e.message));
-  }
+  log('info', '模型配置', `model=${CONFIG.model} provider=${CONFIG.llmBaseUrl} key=${CONFIG.llmApiKey ? '已配置' : '未配置'}`);
 });
 
 const shutdown = () => {

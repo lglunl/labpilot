@@ -146,6 +146,7 @@
           memberCount: 8,
           unread: 3,
           agentId: 'agent_yanzhu',
+          botRole: 'device',
           members: [
             { id: 'user_linyu', name: '林雨', initials: '林', color: 'green' },
             { id: 'user_zhouqun', name: '周群', initials: '周', color: 'amber' },
@@ -391,91 +392,7 @@
           utilization: 52
         }
       ],
-      bookings: [
-        {
-          id: 'BK-1029-01',
-          instrumentId: 'inst_fc',
-          groupId: 'group_microfluidic',
-          applicant: '林雨',
-          purpose: 'PDMS 芯片细胞上样验证',
-          date: today,
-          start: '09:00',
-          end: '10:30',
-          checkInAt: isoAt(0, '09:06'),
-          checkOutAt: isoAt(0, '10:17'),
-          cancelledAt: null,
-          scans: [
-            { type: 'check-in', at: isoAt(0, '09:06'), operator: '林雨', method: '演示扫码' },
-            { type: 'check-out', at: isoAt(0, '10:17'), operator: '林雨', method: '演示扫码' }
-          ],
-          createdAt: isoAt(-1, '10:20')
-        },
-        {
-          id: 'BK-1029-02',
-          instrumentId: 'inst_clsm',
-          groupId: 'group_microfluidic',
-          applicant: '周群',
-          purpose: '共聚焦背景偏高问题重扫',
-          date: today,
-          start: '10:30',
-          end: '12:00',
-          checkInAt: minutesAgo(36),
-          checkOutAt: null,
-          cancelledAt: null,
-          scans: [
-            { type: 'check-in', at: minutesAgo(36), operator: '周群', method: '演示扫码' }
-          ],
-          createdAt: isoAt(-1, '09:36')
-        },
-        {
-          id: 'BK-1029-03',
-          instrumentId: 'inst_pcr',
-          groupId: 'group_microfluidic',
-          applicant: '王晨',
-          purpose: '引物扩增效率复测',
-          date: today,
-          start: '14:00',
-          end: '15:20',
-          checkInAt: null,
-          checkOutAt: null,
-          cancelledAt: null,
-          scans: [],
-          createdAt: isoAt(0, '08:55')
-        },
-        {
-          id: 'BK-1029-04',
-          instrumentId: 'inst_fc',
-          groupId: 'group_microfluidic',
-          applicant: '王晨',
-          purpose: '配比验证后的细胞表型检测',
-          date: tomorrow,
-          start: '10:30',
-          end: '12:00',
-          checkInAt: null,
-          checkOutAt: null,
-          cancelledAt: null,
-          scans: [],
-          createdAt: isoAt(0, '09:10')
-        },
-        {
-          id: 'BK-1028-01',
-          instrumentId: 'inst_pcr',
-          groupId: 'group_platform',
-          applicant: '陈老师',
-          purpose: '公共平台质控样本检测',
-          date: yesterday,
-          start: '15:00',
-          end: '16:00',
-          checkInAt: isoAt(-1, '15:08'),
-          checkOutAt: isoAt(-1, '16:12'),
-          cancelledAt: null,
-          scans: [
-            { type: 'check-in', at: isoAt(-1, '15:08'), operator: '陈老师', method: '演示扫码' },
-            { type: 'check-out', at: isoAt(-1, '16:12'), operator: '陈老师', method: '演示扫码' }
-          ],
-          createdAt: isoAt(-2, '14:12')
-        }
-      ],
+      bookings: [],
       auditEvents: [],
       summaries: {}
     };
@@ -496,6 +413,9 @@
       if (!stored) return buildSeedState();
       const parsed = JSON.parse(stored);
       if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.groups)) return buildSeedState();
+      parsed.groups.forEach((group) => {
+        if (!group.botRole) group.botRole = 'general';
+      });
       return parsed;
     } catch {
       return buildSeedState();
@@ -515,6 +435,13 @@
   function getGroup(groupId = state.currentGroupId) {
     return state.groups.find((group) => group.id === groupId) || state.groups[0];
   }
+
+  // 只有「设备预约管理员」的群可以预约设备；普通群管理员只能总结和充当助手。
+  function canBook(group = getGroup()) {
+    return group?.botRole === 'device';
+  }
+
+  const BOT_ROLE_LABEL = { device: '设备预约管理员', general: '普通群管理员' };
 
   function getAgent(agentId = state.selectedAgentId) {
     return state.agents.find((agent) => agent.id === agentId) || state.agents[0];
@@ -718,7 +645,7 @@
       <section class="view-shell">
         <header class="view-header">
           <div class="view-header-copy">
-            <h1>${escapeHtml(group.name)} <span class="agent-type">Team Agent · Qwen 7B 本地</span></h1>
+            <h1>${escapeHtml(group.name)} <span class="agent-type">${escapeHtml(BOT_ROLE_LABEL[group.botRole] || '普通群管理员')}</span></h1>
             <p>${escapeHtml(group.description)} · ${group.memberCount} 位成员</p>
           </div>
           <div class="view-header-actions">
@@ -751,7 +678,7 @@
           <div class="composer-wrap">
             <div class="quick-actions">
               <button class="quick-action" type="button" data-action="summarize-group">${icon('sparkles')} 生成工作摘要</button>
-              <button class="quick-action" type="button" data-action="open-new-booking">${icon('calendar')} 发起仪器预约</button>
+              ${canBook(group) ? `<button class="quick-action" type="button" data-action="open-new-booking">${icon('calendar')} 发起仪器预约</button>` : ''}
               <button class="quick-action" type="button" data-action="open-import">${icon('upload')} 导入聊天记录</button>
               <button class="quick-action" type="button" data-action="mention-agent">${icon('bot')} @${escapeHtml(agent.name)}</button>
             </div>
@@ -824,7 +751,7 @@
               ${summary.labActions.slice(0, 3).map((action) => `
                 <li>
                   ${escapeHtml(action.label)}
-                  <button class="text-button summary-evidence" type="button" data-action="draft-booking" data-instrument-id="${escapeHtml(action.instrumentId)}">${icon('plus')} 创建预约草稿</button>
+                  ${canBook() ? `<button class="text-button summary-evidence" type="button" data-action="draft-booking" data-instrument-id="${escapeHtml(action.instrumentId)}">${icon('plus')} 创建预约草稿</button>` : ''}
                 </li>
               `).join('')}
             </ul>
@@ -1512,152 +1439,71 @@
   }
 
   function renderAgents() {
-    const selectedAgent = getAgent();
+    // 协作群聊：左侧是各个群聊目录，右侧是当前群的聊天框。
     const group = getGroup();
-    const summary = state.summaries[`${group.id}:${selectedAgent.id}`];
-    const agentSummaries = Object.values(state.summaries)
-      .filter((item) => item.agentId === selectedAgent.id)
-      .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
+    const agent = getAgent(group.agentId);
+    const typing = state.agentTyping
+      ? `<div class="typing-row"><span class="agent-avatar avatar-xs">${icon('bot')}</span><span>${escapeHtml(agent.name)} 正在读取群聊上下文</span><span class="typing-dots"><span></span><span></span><span></span></span></div>`
+      : '';
 
     viewRoot.innerHTML = `
       <section class="view-shell">
         <header class="view-header">
           <div class="view-header-copy">
-            <h1>Team Agent</h1>
-            <p>共享上下文 · 结构化总结 · 人工确认</p>
+            <h1>协作群聊</h1>
+            <p>选择左侧群聊，在右侧直接对话 · 群管理员负责总结与协助</p>
           </div>
           <div class="view-header-actions">
-            <button class="button" type="button" data-action="agent-permissions">${icon('settings')} 权限说明</button>
-            <button class="button button-primary" type="button" data-action="open-agent-create">${icon('plus')} 创建 Agent</button>
+            <button class="button button-primary" type="button" id="collab-new-group">${icon('plus')} 新建群聊</button>
           </div>
         </header>
-        <div class="page-scroll">
-          <div class="page-content">
-            <div class="agent-view-top">
-              <section class="agent-hero">
-                <span class="agent-hero-avatar">${icon('bot')}</span>
-                <div class="agent-hero-copy">
-                  <div class="agent-hero-title">
-                    <h2>${escapeHtml(selectedAgent.name)}</h2>
-                    <span class="agent-type">${escapeHtml(selectedAgent.role)}</span>
-                    <span class="agent-run-status">${selectedAgent.status === 'online' ? '本地 Qwen 7B · 在线' : '空闲'}</span>
-                  </div>
-                  <p>${escapeHtml(selectedAgent.description)}</p>
-                  <div class="agent-hero-actions">
-                    <button class="button button-primary button-sm" type="button" data-action="summarize-selected-agent">${icon('sparkles')} 总结「${escapeHtml(group.name)}」</button>
-                    <button class="button button-sm" type="button" data-action="bind-agent" data-agent-id="${escapeHtml(selectedAgent.id)}">${group.agentId === selectedAgent.id ? `${icon('check')} 当前群 Agent` : '设为当前群 Agent'}</button>
-                    <button class="button button-sm button-ghost" type="button" data-action="show-summary-modal">${icon('message')} 查看最近摘要</button>
-                  </div>
-                </div>
-              </section>
-              <aside class="agent-side-panel">
-                <div>
-                  <h3>权限边界</h3>
-                  <ul class="permission-list">${renderAgentPermissions(selectedAgent)}</ul>
-                </div>
-                <p class="context-footer-note">Agent 的权限不得超过当前用户和项目授权，所有关键动作需要人工确认。</p>
-              </aside>
+        <div class="chat-view collab-view">
+          <aside class="collab-groups">
+            ${state.groups.map((item) => {
+              const last = [...item.messages].reverse().find((message) => message.type !== 'system');
+              return `
+                <button class="group-item ${item.id === group.id ? 'is-active' : ''}" type="button" data-collab-group="${escapeHtml(item.id)}">
+                  <span class="group-avatar ${escapeHtml(item.color)}">${escapeHtml(item.initials)}</span>
+                  <span class="group-copy">
+                    <strong>${escapeHtml(item.name)}</strong>
+                    <small>${escapeHtml(BOT_ROLE_LABEL[item.botRole] || '普通群管理员')} · ${escapeHtml(shortText(last?.content || '尚未开始协作', 14))}</small>
+                  </span>
+                </button>
+              `;
+            }).join('')}
+          </aside>
+            <div class="chat-mode-bar">
+              <strong>${escapeHtml(group.name)}</strong>
+              <span class="chat-mode-divider"></span>
+              <span class="agent-type">${escapeHtml(BOT_ROLE_LABEL[group.botRole] || '普通群管理员')}</span>
+              <span class="chat-mode-note">${escapeHtml(agent.name)} 可总结群聊、充当助手${canBook(group) ? '，并可预约设备' : ''}</span>
             </div>
-            <section class="section-panel">
-              <div class="section-panel-header">
-                <div class="section-panel-title">
-                  <strong>团队 Agents</strong>
-                  <span>不同岗位可拥有不同上下文和工具权限</span>
-                </div>
-                <button class="text-button" type="button" data-action="open-agent-create">新建 Agent</button>
+            <div class="message-scroll" id="message-scroll">
+              <div class="message-list">
+                ${group.messages.map((message) => renderMessage(message, group)).join('')}
+                ${typing}
               </div>
-              <div class="section-panel-body">
-                <div class="agents-grid">
-                  ${state.agents.map((agent) => {
-                    const currentSummary = state.summaries[`${group.id}:${agent.id}`];
-                    return `
-                      <article class="agent-card ${agent.id === selectedAgent.id ? 'is-selected' : ''}" data-action="select-agent" data-agent-id="${escapeHtml(agent.id)}" tabindex="0" role="button" aria-label="选择 ${escapeHtml(agent.name)}">
-                        <div class="agent-card-top">
-                          <div class="agent-card-title">
-                            <span class="agent-avatar">${icon('bot')}</span>
-                            <span>
-                              <strong>${escapeHtml(agent.name)}</strong>
-                              <small>${escapeHtml(agent.role)}</small>
-                            </span>
-                          </div>
-                          <span class="agent-status-dot"></span>
-                        </div>
-                        <p>${escapeHtml(agent.description)}</p>
-                        <div class="agent-card-skills">
-                          ${agent.skills.slice(0, 3).map((skill) => `<span class="capability-chip">${escapeHtml(skill)}</span>`).join('')}
-                        </div>
-                        <div class="agent-card-foot">
-                          <span>${currentSummary ? `上次总结 ${formatTimeOnly(currentSummary.generatedAt)}` : '尚未总结当前群聊'}</span>
-                          ${group.agentId === agent.id ? `<span class="status-badge closed">当前群</span>` : ''}
-                        </div>
-                      </article>
-                    `;
-                  }).join('')}
-                </div>
-              </div>
-            </section>
-            <div class="agent-section dashboard-grid">
-              <section class="section-panel">
-                <div class="section-panel-header">
-                  <div class="section-panel-title">
-                    <strong>最近一次群聊总结</strong>
-                    <span>${escapeHtml(group.name)} · ${escapeHtml(selectedAgent.name)}</span>
-                  </div>
-                  <button class="text-button" type="button" data-action="show-summary-modal">完整摘要</button>
-                </div>
-                <div class="section-panel-body">
-                  ${summary ? renderSummaryCard(summary, true) : `
-                    <div class="summary-empty">
-                      <span class="summary-empty-icon">${icon('sparkles')}</span>
-                      <strong>还没有生成摘要</strong>
-                      <p>让 ${escapeHtml(selectedAgent.name)} 读取当前群聊，提取决策、待办和风险。</p>
-                      <button class="button button-soft button-sm" type="button" data-action="summarize-selected-agent">${icon('sparkles')} 立即总结</button>
-                    </div>
-                  `}
-                </div>
-              </section>
-              <section class="section-panel">
-                <div class="section-panel-header">
-                  <div class="section-panel-title">
-                    <strong>Skills 与 Workspace</strong>
-                    <span>方法是可复用资产，不是一次性的提示词</span>
-                  </div>
-                </div>
-                <div class="section-panel-body">
-                  <div class="skill-list">
-                    ${selectedAgent.skills.map((skill) => `<span class="skill-pill">${icon('sparkles')} ${escapeHtml(skill)}</span>`).join('')}
-                  </div>
-                  <div style="height:14px"></div>
-                  <div class="mini-instrument-list">
-                    ${state.workspace.materials.map((doc) => `
-                      <div class="mini-instrument">
-                        <span class="mini-instrument-icon">${icon('file')}</span>
-                        <span class="mini-instrument-copy">
-                          <strong>${escapeHtml(doc.name)}</strong>
-                          <small>${escapeHtml(doc.type)} · ${formatDateTime(doc.updatedAt)}</small>
-                        </span>
-                        <span class="status-dot available">可用</span>
-                      </div>
-                    `).join('')}
-                    ${state.workspace.artifacts.slice(-2).map((doc) => `
-                      <div class="mini-instrument">
-                        <span class="mini-instrument-icon">${icon('sparkles')}</span>
-                        <span class="mini-instrument-copy">
-                          <strong>${escapeHtml(doc.name)}</strong>
-                          <small>${escapeHtml(doc.type)} · ${formatDateTime(doc.updatedAt)}</small>
-                        </span>
-                        <span class="status-dot available">已保存</span>
-                      </div>
-                    `).join('')}
-                  </div>
-                  <p class="context-footer-note" style="margin-top:12px">${agentSummaries.length ? `当前 Agent 已有 ${agentSummaries.length} 份群聊总结，可保存到 Workspace 供后续实验继续引用。` : '生成摘要后可保存到 Workspace，形成可追溯的项目资产。'}</p>
-                </div>
-              </section>
             </div>
-          </div>
+            <div class="composer-wrap">
+              <div class="quick-actions">
+                <button class="quick-action" type="button" data-action="summarize-group">${icon('sparkles')} 总结群聊</button>
+                ${canBook(group) ? `<button class="quick-action" type="button" data-action="open-new-booking">${icon('calendar')} 发起仪器预约</button>` : `<span class="chat-mode-note">普通群管理不能预约设备</span>`}
+              </div>
+              <div class="composer">
+                <div class="composer-main">
+                  <textarea id="chat-input" rows="2" placeholder="输入消息，输入 @${escapeHtml(agent.name)} 可召唤群助手" aria-label="群聊消息"></textarea>
+                </div>
+                <button class="icon-button send-button" type="button" data-action="send-message" aria-label="发送消息" title="发送消息">${icon('send')}</button>
+              </div>
+            </div>
         </div>
       </section>
     `;
+
+    requestAnimationFrame(() => {
+      const scroll = $('#message-scroll');
+      if (scroll) scroll.scrollTop = scroll.scrollHeight;
+    });
   }
 
   function renderDashboard() {
@@ -2003,10 +1849,17 @@
                 <input id="group-description" name="description" type="text" placeholder="这个群主要协作什么工作">
               </div>
               <div class="form-field full">
-                <label for="group-agent">默认 Team Agent</label>
-                <select id="group-agent" name="agentId">
-                  ${state.agents.map((agent) => `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)} · ${escapeHtml(agent.role)}</option>`).join('')}
-                </select>
+                <label>群管理员 <span>*</span></label>
+                <div class="checkbox-list">
+                  <label class="checkbox-row">
+                    <input type="radio" name="botRole" value="device" checked>
+                    <span>设备预约管理员<small>可以总结群聊、充当群助手，并且能发起仪器预约。</small></span>
+                  </label>
+                  <label class="checkbox-row">
+                    <input type="radio" name="botRole" value="general">
+                    <span>普通群管理员<small>可以总结群聊、充当群助手，但不能预约设备。</small></span>
+                  </label>
+                </div>
               </div>
             </div>
             <div class="form-error" id="group-error" style="margin-top:10px"></div>
@@ -2317,7 +2170,7 @@
     return messages.slice(0, 500);
   }
 
-  function createBookingFromForm(form) {
+  async function createBookingFromForm(form) {
     const formData = new FormData(form);
     const instrumentId = String(formData.get('instrumentId') || '');
     const date = String(formData.get('date') || '');
@@ -2350,9 +2203,25 @@
     );
     if (overlap) return fail(`该时段与 ${overlap.id}（${overlap.start}–${overlap.end}）冲突，请调整时间。`);
 
+    let serverId = '';
+    try {
+      const response = await fetch('/api/bookings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instrumentId, applicant, purpose, date, start, end })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        return fail(payload.message || '预约未能写入后台，请确认预约服务已启动。');
+      }
+      serverId = payload.booking?.id || '';
+    } catch {
+      return fail('无法连接预约后台，请确认服务已启动。');
+    }
+
     const sequence = state.bookings.filter((booking) => booking.date === date).length + 1;
     const booking = {
-      id: `BK-${date.replaceAll('-', '').slice(4)}-${String(sequence).padStart(2, '0')}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
+      id: serverId || `BK-${date.replaceAll('-', '').slice(4)}-${String(sequence).padStart(2, '0')}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
       instrumentId,
       groupId: state.currentGroupId,
       applicant,
@@ -2477,8 +2346,8 @@
       error.classList.add('is-visible');
       return;
     }
-    const agentId = String(formData.get('agentId') || state.selectedAgentId);
-    const agent = getAgent(agentId);
+    const botRole = formData.get('botRole') === 'general' ? 'general' : 'device';
+    const agent = botRole === 'device' ? getAgent('agent_platform') : getAgent('agent_yanzhu');
     const group = {
       id: uid('group'),
       name,
@@ -2488,6 +2357,7 @@
       memberCount: 1,
       unread: 0,
       agentId: agent.id,
+      botRole,
       members: [state.currentUser],
       messages: [
         {
@@ -2507,7 +2377,7 @@
     toast(`群聊「${name}」已创建。`);
   }
 
-  function handleScanSubmit(form) {
+  async function handleScanSubmit(form) {
     const bookingId = form.dataset.bookingId;
     const scanType = form.dataset.scanType;
     const booking = getBooking(bookingId);
@@ -2539,6 +2409,17 @@
     const nowIso = new Date().toISOString();
     if (scanType === 'check-in') {
       if (booking.checkInAt) return fail('该预约已经完成上机扫描，不能重复上机。');
+      try {
+        const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}/scan`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'check-in', at: nowIso })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok) return fail(payload.message || '回写预约后台失败，请稍后再试。');
+      } catch {
+        return fail('无法连接预约后台，请确认服务已启动。');
+      }
       booking.checkInAt = nowIso;
       booking.scans = Array.isArray(booking.scans) ? booking.scans : [];
       booking.scans.push({ type: 'check-in', at: nowIso, operator: state.currentUser.name, method: '演示扫码' });
@@ -2562,6 +2443,17 @@
       if (new Date(nowIso).getTime() <= new Date(booking.checkInAt).getTime()) {
         return fail('下机时间必须晚于上机时间。');
       }
+      try {
+        const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}/scan`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'check-out', at: nowIso })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok) return fail(payload.message || '回写预约后台失败，请稍后再试。');
+      } catch {
+        return fail('无法连接预约后台，请确认服务已启动。');
+      }
       booking.checkOutAt = nowIso;
       booking.scans = Array.isArray(booking.scans) ? booking.scans : [];
       booking.scans.push({ type: 'check-out', at: nowIso, operator: state.currentUser.name, method: '演示扫码' });
@@ -2580,11 +2472,22 @@
     }
   }
 
-  function cancelBooking(bookingId) {
+  async function cancelBooking(bookingId) {
     const booking = getBooking(bookingId);
     if (!booking) return;
     if (booking.checkInAt) {
       toast('已上机的预约不能直接取消，请先完成下机或走管理员异常处理。', 'error');
+      return;
+    }
+    try {
+      const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}/cancel`, { method: 'POST' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        toast(payload.message || '取消预约失败，请稍后再试。', 'error');
+        return;
+      }
+    } catch {
+      toast('无法连接预约后台，请确认服务已启动。', 'error');
       return;
     }
     booking.cancelledAt = new Date().toISOString();
@@ -2740,6 +2643,21 @@
       return;
     }
 
+    const collabTarget = event.target.closest('[data-collab-group]');
+    if (collabTarget) {
+      const group = getGroup(collabTarget.dataset.collabGroup);
+      state.currentGroupId = group.id;
+      group.unread = 0;
+      saveState();
+      renderView();
+      return;
+    }
+
+    if (event.target.closest('#collab-new-group')) {
+      openNewGroupModal();
+      return;
+    }
+
     const groupTarget = event.target.closest('[data-group-id]');
     if (groupTarget) {
       const group = getGroup(groupTarget.dataset.groupId);
@@ -2791,6 +2709,10 @@
       return;
     }
     if (action === 'open-new-booking' || action === 'draft-booking' || action === 'open-booking') {
+      if (!canBook()) {
+        toast('当前群是普通群管理，不能预约设备。请在「设备预约管理员」的群里发起预约。', 'error');
+        return;
+      }
       openBookingModal(actionTarget.dataset.instrumentId || '');
       return;
     }
@@ -2977,5 +2899,72 @@
   });
   backdrop.addEventListener('click', closeModal);
 
+  // 启动时把后台（sqlite）里的预约合并进本地状态，保证扫码 agent 看到的预约和这里一致。
+  async function syncBookingsFromServer() {
+    try {
+      const response = await fetch('/api/instruments');
+      if (!response.ok) return;
+      const { instruments = [] } = await response.json();
+      let changed = false;
+      // 仪器列表以后台为准：用后端返回的完整字段更新本地（id/code/name/model/location/status/manager/category/utilization）。
+      if (instruments.length) {
+        const byId = new Map(instruments.map((item) => [item.id, item]));
+        const merged = state.instruments.map((item) => {
+          const server = byId.get(item.id);
+          return server ? { ...item, ...server } : item;
+        });
+        if (JSON.stringify(merged) !== JSON.stringify(state.instruments)) {
+          state.instruments = merged;
+          changed = true;
+        }
+      }
+      for (const instrument of instruments) {
+        const res = await fetch(`/api/bookings/instrument/${encodeURIComponent(instrument.id)}`);
+        if (!res.ok) continue;
+        const { bookings = [] } = await res.json();
+        for (const booking of bookings) {
+          const existing = state.bookings.find((item) => item.id === booking.id);
+          if (existing) {
+            // 把扫码 agent 回写的上机 / 下机时间同步到本地，台账状态随之更新。
+            if (booking.checkInAt && existing.checkInAt !== booking.checkInAt) {
+              existing.checkInAt = booking.checkInAt;
+              changed = true;
+            }
+            if (booking.checkOutAt && existing.checkOutAt !== booking.checkOutAt) {
+              existing.checkOutAt = booking.checkOutAt;
+              changed = true;
+            }
+            continue;
+          }
+          state.bookings.push({
+            id: booking.id,
+            instrumentId: booking.instrumentId,
+            groupId: state.currentGroupId,
+            applicant: booking.applicant,
+            purpose: booking.purpose || '',
+            date: booking.date,
+            start: booking.start,
+            end: booking.end,
+            checkInAt: booking.checkInAt || null,
+            checkOutAt: booking.checkOutAt || null,
+            cancelledAt: null,
+            scans: [],
+            createdAt: booking.createdAt || new Date().toISOString()
+          });
+          changed = true;
+        }
+      }
+      if (changed) {
+        saveState();
+        renderView();
+      }
+    } catch {
+      // 预约后台不可用时，前端仍按本地演示数据工作。
+    }
+  }
+
   renderView();
+  syncBookingsFromServer();
+  // 定期拉取扫码回写的上机 / 下机状态，让打开的页面能看到反馈。
+  setInterval(syncBookingsFromServer, 15000);
 })();

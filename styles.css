@@ -742,6 +742,30 @@ svg {
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
+.collab-view {
+  grid-template-columns: 264px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.collab-groups {
+  grid-column: 1;
+  grid-row: 1 / span 3;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  border-right: 1px solid var(--line);
+  background: #fbfcfa;
+}
+
+.collab-view .chat-mode-bar,
+.collab-view .message-scroll,
+.collab-view .composer-wrap {
+  grid-column: 2;
+}
+
 .chat-mode-bar {
   display: flex;
   align-items: center;

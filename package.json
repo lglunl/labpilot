@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "LabPilot 智研台 —— 静态前端 + 本地 Ollama 摘要服务",
+  "description": "LabPilot 智研台 —— 静态前端 + DeepSeek 摘要服务",
   "scripts": {
     "start": "node --env-file-if-exists=.env server/index.js",
     "dev": "node --env-file-if-exists=.env server/index.js",
