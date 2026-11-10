@@ -97,6 +97,10 @@ export function openDatabase() {
   ensureColumn(db, 'bookings', 'check_in_at', 'TEXT');
   ensureColumn(db, 'bookings', 'check_out_at', 'TEXT');
   ensureColumn(db, 'bookings', 'cancelled_at', 'TEXT');
+  ensureColumn(db, 'bookings', 'scan_email', 'TEXT');
+  ensureColumn(db, 'bookings', 'folder_path', 'TEXT');
+  ensureColumn(db, 'bookings', 'send_status', 'TEXT');
+  ensureColumn(db, 'bookings', 'send_error', 'TEXT');
   seed(db);
   return db;
 }
@@ -225,6 +229,10 @@ function publicBooking(row) {
     checkOutAt: row.check_out_at || null,
     cancelledAt: row.cancelled_at || null,
     createdAt: row.created_at,
+    email: row.scan_email || '',
+    folderPath: row.folder_path || '',
+    sendStatus: row.send_status || '',
+    sendError: row.send_error || '',
   };
 }
 
@@ -242,8 +250,20 @@ export function createApi(db) {
   const selectActive = db.prepare(
     `SELECT * FROM bookings
       WHERE instrument_id = ? AND applicant = ? AND date = ? AND status = 'active'
+        AND check_in_at IS NULL AND check_out_at IS NULL
         AND start <= ? AND end >= ?
       ORDER BY start LIMIT 1`,
+  );
+  const selectOpenOnInstrument = db.prepare(
+    `SELECT * FROM bookings
+      WHERE instrument_id = ? AND status = 'active'
+        AND check_in_at IS NOT NULL AND check_out_at IS NULL
+      ORDER BY check_in_at DESC LIMIT 1`,
+  );
+  const selectPendingSend = db.prepare(
+    `SELECT * FROM bookings
+      WHERE instrument_id = ? AND send_status = 'pending'
+      ORDER BY check_out_at DESC LIMIT 1`,
   );
   const selectByInstrument = db.prepare(
     `SELECT * FROM bookings WHERE instrument_id = ? AND status = 'active' ORDER BY date, start`,
@@ -438,6 +458,42 @@ export function createApi(db) {
     activeBooking({ instrumentId, applicant, date, time }) {
       const row = selectActive.get(instrumentId, applicant, date, time, time);
       return publicBooking(row);
+    },
+
+    openCheckIn(instrumentId) {
+      return publicBooking(selectOpenOnInstrument.get(instrumentId));
+    },
+
+    desk(instrumentId) {
+      if (!selectInstrumentById.get(instrumentId)) return { ok: false, reason: 'not_found' };
+      const open = selectOpenOnInstrument.get(instrumentId);
+      if (open) return { ok: true, phase: 'checked-in', booking: publicBooking(open) };
+      const pending = selectPendingSend.get(instrumentId);
+      if (pending) return { ok: true, phase: 'need-send', booking: publicBooking(pending) };
+      return { ok: true, phase: 'idle', booking: null };
+    },
+
+    setScanMail(id, email) {
+      const row = selectById.get(id);
+      if (!row) return { ok: false, reason: 'not_found' };
+      const status = String(email || '').trim() ? 'pending' : 'skipped';
+      db.prepare('UPDATE bookings SET scan_email = ?, send_status = ?, send_error = NULL WHERE id = ?')
+        .run(String(email || '').trim(), status, id);
+      return { ok: true, booking: publicBooking(selectById.get(id)) };
+    },
+
+    reportDesk(instrumentId, { bookingId, folderPath, sendStatus, sendError }) {
+      const row = selectById.get(String(bookingId || ''));
+      if (!row || row.instrument_id !== instrumentId) return { ok: false, reason: 'not_found' };
+      if (folderPath && !row.folder_path) {
+        db.prepare('UPDATE bookings SET folder_path = ? WHERE id = ?').run(String(folderPath).slice(0, 500), row.id);
+      }
+      const status = String(sendStatus || '');
+      if (status === 'sent' || status === 'failed' || status === 'skipped') {
+        db.prepare('UPDATE bookings SET send_status = ?, send_error = ? WHERE id = ?')
+          .run(status, String(sendError || '').slice(0, 300), row.id);
+      }
+      return { ok: true, booking: publicBooking(selectById.get(row.id)) };
     },
 
     bookingsForInstrument(instrumentId) {
