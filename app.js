@@ -2151,6 +2151,32 @@
     `;
   }
 
+  function presenceLabel(device) {
+    if (!device.publicUrl || !device.presenceAt) return { text: '未登记', cls: 'overdue' };
+    const age = Date.now() - new Date(device.presenceAt).getTime();
+    if (Number.isFinite(age) && age < 10 * 60 * 1000) return { text: '在线', cls: 'closed' };
+    return { text: '已离线', cls: 'overdue' };
+  }
+
+  async function downloadInstrumentQr(id) {
+    const device = adminDevices.find((item) => item.id === id);
+    const response = await adminFetch(`/api/admin/instruments/${encodeURIComponent(id)}/qr.svg`);
+    if (!response) return;
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      toast(payload.message || '二维码生成失败。请先在服务器配置 PUBLIC_BASE_URL。', 'error');
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${device?.code || id}.svg`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast(`已下载 ${device?.name || id} 的二维码。`);
+  }
+
   function renderAdminDevices() {
     return `
       <div class="admin-toolbar">
@@ -2163,26 +2189,33 @@
       <div class="data-table-wrap">
         <table class="data-table">
           <thead>
-            <tr><th>设备</th><th>编号</th><th>位置</th><th>状态</th><th>负责人</th><th>类别</th><th>利用率</th><th>操作</th></tr>
+            <tr><th>设备</th><th>编号</th><th>位置</th><th>状态</th><th>扫码登记</th><th>最近扫码</th><th>操作</th></tr>
           </thead>
           <tbody>
-            ${adminDevices.map((d) => `
+            ${adminDevices.map((d) => {
+              const presence = presenceLabel(d);
+              return `
               <tr>
-                <td><div class="table-main"><strong>${escapeHtml(d.name)}</strong><small>${escapeHtml(d.model || '—')}</small></div></td>
+                <td><div class="table-main"><strong>${escapeHtml(d.name)}</strong><small>${escapeHtml(d.model || '—')} · ${escapeHtml(d.id)}</small></div></td>
                 <td>${escapeHtml(d.code || '—')}</td>
                 <td>${escapeHtml(d.location || '—')}</td>
                 <td><span class="status-badge ${d.status === 'available' ? 'closed' : d.status === 'in-use' ? 'in-use' : 'overdue'}">${escapeHtml(instrumentStatusLabel(d.status))}</span></td>
-                <td>${escapeHtml(d.manager || '—')}</td>
-                <td>${escapeHtml(d.category || '—')}</td>
-                <td>${d.utilization != null ? `${escapeHtml(String(d.utilization))}%` : '—'}</td>
+                <td>
+                  <div class="table-main">
+                    <span class="status-badge ${presence.cls}">${presence.text}</span>
+                    <small>${d.presenceAt ? escapeHtml(formatDateTime(d.presenceAt)) : '设备电脑尚未登记'}</small>
+                  </div>
+                </td>
+                <td>${d.lastScanAt ? escapeHtml(formatDateTime(d.lastScanAt)) : '—'}</td>
                 <td>
                   <div class="table-actions">
+                    <button class="button button-sm button-soft" type="button" data-action="admin-device-qr" data-device-id="${escapeHtml(d.id)}">二维码</button>
                     <button class="button button-sm button-soft" type="button" data-action="admin-device-edit" data-device-id="${escapeHtml(d.id)}">编辑</button>
                     <button class="button button-sm button-ghost" type="button" data-action="admin-device-delete" data-device-id="${escapeHtml(d.id)}">删除</button>
                   </div>
                 </td>
-              </tr>
-            `).join('') || `<tr><td colspan="8"><div class="empty-state" style="padding:28px">暂无设备</div></td></tr>`}
+              </tr>`;
+            }).join('') || `<tr><td colspan="7"><div class="empty-state" style="padding:28px">暂无设备</div></td></tr>`}
           </tbody>
         </table>
       </div>
@@ -3375,6 +3408,10 @@
     }
     if (action === 'admin-device-delete') {
       adminDeleteDevice(actionTarget.dataset.deviceId);
+      return;
+    }
+    if (action === 'admin-device-qr') {
+      downloadInstrumentQr(actionTarget.dataset.deviceId);
       return;
     }
     if (action === 'admin-booking-edit') {

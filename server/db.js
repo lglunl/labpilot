@@ -67,6 +67,13 @@ export function openDatabase() {
       category TEXT,
       utilization INTEGER DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS scan_visits (
+      id TEXT PRIMARY KEY,
+      instrument_id TEXT NOT NULL,
+      visited_at TEXT NOT NULL,
+      redirected INTEGER NOT NULL DEFAULT 0,
+      public_url TEXT
+    );
     CREATE TABLE IF NOT EXISTS bookings (
       id TEXT PRIMARY KEY,
       instrument_id TEXT NOT NULL,
@@ -83,6 +90,8 @@ export function openDatabase() {
     );
   `);
   ensureColumn(db, 'users', 'is_admin', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'instruments', 'public_url', 'TEXT');
+  ensureColumn(db, 'instruments', 'presence_at', 'TEXT');
   ensureColumn(db, 'bookings', 'check_in_at', 'TEXT');
   ensureColumn(db, 'bookings', 'check_out_at', 'TEXT');
   ensureColumn(db, 'bookings', 'cancelled_at', 'TEXT');
@@ -175,7 +184,28 @@ function publicInstrument(row) {
     manager: row.manager || '',
     category: row.category || '',
     utilization: row.utilization || 0,
+    publicUrl: row.public_url || '',
+    presenceAt: row.presence_at || null,
+    lastScanAt: row.last_scan_at || null,
   };
+}
+
+function normalizePublicUrl(value) {
+  const text = String(value || '').trim().replace(/\/+$/, '');
+  if (!/^https?:\/\/[^\s]+$/i.test(text) || text.length > 300) return '';
+  try {
+    const url = new URL(text);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function scanRedirectUrl(publicUrl, instrumentId) {
+  const url = new URL(publicUrl);
+  url.searchParams.set('instrument', instrumentId);
+  return url.toString();
 }
 
 function publicBooking(row) {
@@ -225,8 +255,16 @@ export function createApi(db) {
   );
 
   // 仪器表查询
-  const selectInstruments = db.prepare('SELECT * FROM instruments ORDER BY id');
-  const selectInstrumentById = db.prepare('SELECT * FROM instruments WHERE id = ?');
+  const instrumentSelect = `
+    SELECT i.*,
+      (SELECT MAX(visited_at) FROM scan_visits v WHERE v.instrument_id = i.id) AS last_scan_at
+    FROM instruments i`;
+  const selectInstruments = db.prepare(`${instrumentSelect} ORDER BY i.id`);
+  const selectInstrumentById = db.prepare(`${instrumentSelect} WHERE i.id = ?`);
+  const markPresence = db.prepare('UPDATE instruments SET public_url = ?, presence_at = ? WHERE id = ?');
+  const insertScanVisit = db.prepare(
+    'INSERT INTO scan_visits (id, instrument_id, visited_at, redirected, public_url) VALUES (?, ?, ?, ?, ?)',
+  );
   const insertInstrument = db.prepare(
     `INSERT INTO instruments (id, code, name, model, location, status, manager, category, utilization)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -282,6 +320,33 @@ export function createApi(db) {
 
     instrumentById(id) {
       return publicInstrument(selectInstrumentById.get(id));
+    },
+
+    // 扫码 agent 上报当前公网地址。返回更新后的仪器。
+    recordPresence(id, publicUrl) {
+      const existing = selectInstrumentById.get(id);
+      if (!existing) return { ok: false, reason: 'not_found' };
+      const url = normalizePublicUrl(publicUrl);
+      if (!url) return { ok: false, reason: 'bad_url' };
+      const at = new Date().toISOString();
+      markPresence.run(url, at, id);
+      return { ok: true, instrument: publicInstrument(selectInstrumentById.get(id)) };
+    },
+
+    // 手机打开二维码：记一条扫码访问，有登记地址则给出跳转目标。
+    openScan(id) {
+      const existing = selectInstrumentById.get(id);
+      if (!existing) return { ok: false, reason: 'not_found' };
+      const instrument = publicInstrument(existing);
+      const redirectUrl = instrument.publicUrl ? scanRedirectUrl(instrument.publicUrl, instrument.id) : '';
+      insertScanVisit.run(
+        `SV-${crypto.randomBytes(6).toString('hex')}`,
+        instrument.id,
+        new Date().toISOString(),
+        redirectUrl ? 1 : 0,
+        instrument.publicUrl || null,
+      );
+      return { ok: true, instrument: publicInstrument(selectInstrumentById.get(id)), redirectUrl };
     },
 
     createInstrument({ id, code, name, model, location, status, manager, category, utilization }) {

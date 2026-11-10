@@ -8,6 +8,7 @@ import { SUMMARY_SCHEMA, normalizeSummary, isUsableSummary } from './schema.js';
 import { ruleSummary } from './fallback.js';
 import { createStaticHandler } from './static.js';
 import { openDatabase, createApi } from './db.js';
+import QRCode from 'qrcode';
 
 const dbApi = createApi(openDatabase());
 
@@ -25,6 +26,7 @@ const CONFIG = {
   maxQueue: Number(process.env.MAX_QUEUE || 3),
   cacheTtlMs: Number(process.env.CACHE_TTL_MS || 10 * 60_000),
   apiToken: process.env.LAB_API_TOKEN || '',
+  publicBaseUrl: (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, ''),
 };
 
 const log = (level, message, extra = '') => {
@@ -270,6 +272,61 @@ function sendJson(res, status, payload) {
   res.end(text);
 }
 
+function sendHtml(res, status, html) {
+  res.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(html);
+}
+
+function escapeHtml(value = '') {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function offlinePage(title, message) {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f3f5f1; color: #17231f; font-family: "Microsoft YaHei UI", sans-serif; }
+    main { max-width: 420px; padding: 28px; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    p { margin: 0; line-height: 1.6; color: #37453f; }
+  </style>
+</head>
+<body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main></body>
+</html>`;
+}
+
+// 二维码必须指向稳定入口。优先用 PUBLIC_BASE_URL；管理员从隧道域名打开后台时，用当前访问地址。
+function publicBaseUrl(req) {
+  if (CONFIG.publicBaseUrl) return CONFIG.publicBaseUrl;
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  if (!host || host.startsWith('127.0.0.1') || host.startsWith('localhost')) return '';
+  const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+  return `${proto}://${host}`.replace(/\/+$/, '');
+}
+
+async function instrumentQrSvg(req, id) {
+  const base = publicBaseUrl(req);
+  const instrument = dbApi.instrumentById(id);
+  if (!instrument) return { ok: false, status: 404, message: '设备不存在' };
+  if (!base) {
+    return { ok: false, status: 400, message: '未配置 PUBLIC_BASE_URL，无法生成可打印的二维码' };
+  }
+  const target = `${base}/s/${encodeURIComponent(instrument.id)}`;
+  const svg = await QRCode.toString(target, { type: 'svg', margin: 1, errorCorrectionLevel: 'M', width: 320 });
+  return { ok: true, svg, filename: `${instrument.code || instrument.id}.svg`, target };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname;
@@ -283,6 +340,36 @@ const server = http.createServer(async (req, res) => {
       queueDepth,
       cacheSize: cache.size,
     });
+  }
+
+  // 手机扫仪器二维码：先记访问，再跳到这台设备当前登记的扫码地址。
+  const scanEntryMatch = pathname.match(/^\/s\/([^/]+)$/);
+  if (scanEntryMatch && req.method === 'GET') {
+    const result = dbApi.openScan(decodeURIComponent(scanEntryMatch[1]));
+    if (!result.ok) return sendHtml(res, 404, offlinePage('找不到这台仪器', '二维码对应的仪器不存在。'));
+    if (!result.redirectUrl) {
+      return sendHtml(res, 200, offlinePage(
+        '设备未上线',
+        `${result.instrument.name} 还没有向预约系统登记扫码地址。请确认这台设备电脑上的扫码程序已启动。`,
+      ));
+    }
+    log('info', '扫码访问', `instrument=${result.instrument.id}`);
+    res.writeHead(302, { Location: result.redirectUrl, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+
+  const presenceMatch = pathname.match(/^\/api\/instruments\/([^/]+)\/presence$/);
+  if (presenceMatch && req.method === 'POST') {
+    if (!authorize(req)) return sendJson(res, 401, { error: '未授权' });
+    let body;
+    try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+    const result = dbApi.recordPresence(decodeURIComponent(presenceMatch[1]), body?.publicUrl);
+    if (!result.ok) {
+      const message = result.reason === 'bad_url' ? '公网地址不合法' : '仪器不存在';
+      return sendJson(res, result.reason === 'bad_url' ? 400 : 404, { ok: false, reason: result.reason, message });
+    }
+    log('info', '设备登记扫码地址', `instrument=${result.instrument.id}`);
+    return sendJson(res, 200, { ok: true, instrument: result.instrument });
   }
 
   // ---------- 管理后台接口（admin 会话鉴权，独立于 LAB_API_TOKEN） ----------
@@ -364,6 +451,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/api/admin/users' && req.method === 'GET') {
       return sendJson(res, 200, { users: dbApi.listUsers() });
+    }
+    const qrMatch = pathname.match(/^\/api\/admin\/instruments\/([^/]+)\/qr\.svg$/);
+    if (qrMatch && req.method === 'GET') {
+      const result = await instrumentQrSvg(req, decodeURIComponent(qrMatch[1]));
+      if (!result.ok) return sendJson(res, result.status || 400, { ok: false, message: result.message });
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${result.filename}"`,
+        'Cache-Control': 'no-store',
+      });
+      return res.end(result.svg);
     }
     return sendJson(res, 404, { error: '接口不存在' });
   }
