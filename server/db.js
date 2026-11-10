@@ -21,11 +21,13 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(a, b);
 }
 
+// isAdmin：后台管理权限标志。admin 为独立的管理后台账号；业务角色(role)仅作展示标签。
 const SEED_USERS = [
-  { id: 'user_linyu', name: '林雨', email: 'linyu@lab.local', password: 'linyu123', role: '课题组 · 管理员' },
-  { id: 'user_zhouqun', name: '周群', email: 'zhouqun@lab.local', password: 'zhouqun123', role: '课题组成员' },
-  { id: 'user_wangchen', name: '王晨', email: 'wangchen@lab.local', password: 'wangchen123', role: '课题组成员' },
-  { id: 'user_chen', name: '陈老师', email: 'chen@lab.local', password: 'chen123', role: '平台管理员' },
+  { id: 'user_linyu', name: '林雨', email: 'linyu@lab.local', password: 'linyu123', role: '课题组 · 管理员', isAdmin: 0 },
+  { id: 'user_zhouqun', name: '周群', email: 'zhouqun@lab.local', password: 'zhouqun123', role: '课题组成员', isAdmin: 0 },
+  { id: 'user_wangchen', name: '王晨', email: 'wangchen@lab.local', password: 'wangchen123', role: '课题组成员', isAdmin: 0 },
+  { id: 'user_chen', name: '陈老师', email: 'chen@lab.local', password: 'chen123', role: '平台管理员', isAdmin: 0 },
+  { id: 'user_admin', name: 'admin', email: 'admin@lab.local', password: 'admin123', role: '平台管理员', isAdmin: 1 },
 ];
 
 const SEED_INSTRUMENTS = [
@@ -54,6 +56,17 @@ export function openDatabase() {
       password_hash TEXT NOT NULL,
       role TEXT
     );
+    CREATE TABLE IF NOT EXISTS instruments (
+      id TEXT PRIMARY KEY,
+      code TEXT,
+      name TEXT NOT NULL,
+      model TEXT,
+      location TEXT,
+      status TEXT NOT NULL DEFAULT 'available',
+      manager TEXT,
+      category TEXT,
+      utilization INTEGER DEFAULT 0
+    );
     CREATE TABLE IF NOT EXISTS bookings (
       id TEXT PRIMARY KEY,
       instrument_id TEXT NOT NULL,
@@ -69,6 +82,7 @@ export function openDatabase() {
       created_at TEXT NOT NULL
     );
   `);
+  ensureColumn(db, 'users', 'is_admin', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'bookings', 'check_in_at', 'TEXT');
   ensureColumn(db, 'bookings', 'check_out_at', 'TEXT');
   ensureColumn(db, 'bookings', 'cancelled_at', 'TEXT');
@@ -84,15 +98,38 @@ function ensureColumn(db, table, column, type) {
 }
 
 function seed(db) {
-  const count = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
-  if (count > 0) return;
+  seedUsers(db);
+  seedInstruments(db);
+  seedBookings(db);
+}
 
-  const insertUser = db.prepare(
-    'INSERT INTO users (id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)',
+function seedUsers(db) {
+  const find = db.prepare('SELECT id FROM users WHERE name = ?');
+  const insert = db.prepare(
+    'INSERT INTO users (id, name, email, password_hash, role, is_admin) VALUES (?, ?, ?, ?, ?, ?)',
   );
   for (const user of SEED_USERS) {
-    insertUser.run(user.id, user.name, user.email, hashPassword(user.password), user.role);
+    if (!find.get(user.name)) {
+      insert.run(user.id, user.name, user.email, hashPassword(user.password), user.role, user.isAdmin ? 1 : 0);
+    }
   }
+}
+
+function seedInstruments(db) {
+  const count = db.prepare('SELECT COUNT(*) AS n FROM instruments').get().n;
+  if (count > 0) return;
+  const insert = db.prepare(
+    `INSERT INTO instruments (id, code, name, model, location, status, manager, category, utilization)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const item of SEED_INSTRUMENTS) {
+    insert.run(item.id, item.code, item.name, item.model, item.location, item.status, item.manager, item.category, item.utilization);
+  }
+}
+
+function seedBookings(db) {
+  const count = db.prepare('SELECT COUNT(*) AS n FROM bookings').get().n;
+  if (count > 0) return;
 
   const insertBooking = db.prepare(
     `INSERT INTO bookings
@@ -123,7 +160,22 @@ function seed(db) {
 
 function publicUser(row) {
   if (!row) return null;
-  return { id: row.id, name: row.name, email: row.email, role: row.role };
+  return { id: row.id, name: row.name, email: row.email, role: row.role, isAdmin: Boolean(row.is_admin) };
+}
+
+function publicInstrument(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    code: row.code || '',
+    name: row.name,
+    model: row.model || '',
+    location: row.location || '',
+    status: row.status || 'available',
+    manager: row.manager || '',
+    category: row.category || '',
+    utilization: row.utilization || 0,
+  };
 }
 
 function publicBooking(row) {
@@ -161,6 +213,7 @@ export function createApi(db) {
     `SELECT * FROM bookings WHERE instrument_id = ? AND status = 'active' ORDER BY date, start`,
   );
   const selectById = db.prepare('SELECT * FROM bookings WHERE id = ?');
+  const selectAllBookings = db.prepare('SELECT * FROM bookings ORDER BY date DESC, start');
   const markCheckIn = db.prepare(
     `UPDATE bookings SET check_in_at = ? WHERE id = ? AND check_in_at IS NULL`,
   );
@@ -171,8 +224,36 @@ export function createApi(db) {
     `UPDATE bookings SET cancelled_at = ?, status = 'cancelled' WHERE id = ? AND check_in_at IS NULL`,
   );
 
+  // 仪器表查询
+  const selectInstruments = db.prepare('SELECT * FROM instruments ORDER BY id');
+  const selectInstrumentById = db.prepare('SELECT * FROM instruments WHERE id = ?');
+  const insertInstrument = db.prepare(
+    `INSERT INTO instruments (id, code, name, model, location, status, manager, category, utilization)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const updateInstrument = db.prepare(
+    `UPDATE instruments SET code = ?, name = ?, model = ?, location = ?, status = ?, manager = ?, category = ?, utilization = ? WHERE id = ?`,
+  );
+  const deleteInstrument = db.prepare('DELETE FROM instruments WHERE id = ?');
+  const countBookingsForInstrument = db.prepare('SELECT COUNT(*) AS n FROM bookings WHERE instrument_id = ?');
+
+  // 用户列表
+  const selectAllUsers = db.prepare('SELECT * FROM users ORDER BY name');
+
+  // 预约改单（管理后台）
+  const updateBooking = db.prepare(
+    `UPDATE bookings SET instrument_id = ?, applicant = ?, purpose = ?, date = ?, start = ?, end = ?, status = ? WHERE id = ?`,
+  );
+
+  const instruments = () => selectInstruments.all().map(publicInstrument);
+
   return {
-    instruments: SEED_INSTRUMENTS,
+    instruments: instruments(),
+
+    refreshInstruments() {
+      // 保持返回引用一致（前端可能反复调用 instruments 属性）。这里返回一份新数组。
+      return instruments();
+    },
 
     authenticate(name, password) {
       const row = findUserByName.get(String(name || '').trim());
@@ -181,6 +262,81 @@ export function createApi(db) {
         return { ok: false, reason: 'bad_password' };
       }
       return { ok: true, user: publicUser(row) };
+    },
+
+    // 管理后台登录：必须是 is_admin 用户。
+    adminLogin(name, password) {
+      const result = this.authenticate(name, password);
+      if (!result.ok) return result;
+      if (!result.user.isAdmin) return { ok: false, reason: 'not_admin' };
+      return { ok: true, user: result.user };
+    },
+
+    listUsers() {
+      return selectAllUsers.all().map(publicUser);
+    },
+
+    listInstruments() {
+      return instruments();
+    },
+
+    instrumentById(id) {
+      return publicInstrument(selectInstrumentById.get(id));
+    },
+
+    createInstrument({ id, code, name, model, location, status, manager, category, utilization }) {
+      const normalizedId = String(id || '').trim();
+      if (!normalizedId || !String(name || '').trim()) return { ok: false, reason: 'missing_fields' };
+      if (selectInstrumentById.get(normalizedId)) return { ok: false, reason: 'duplicate_id' };
+      insertInstrument.run(
+        normalizedId,
+        String(code || '').trim(),
+        String(name).trim(),
+        String(model || '').trim(),
+        String(location || '').trim(),
+        String(status || 'available').trim() || 'available',
+        String(manager || '').trim(),
+        String(category || '').trim(),
+        Number(utilization || 0),
+      );
+      return { ok: true, instrument: publicInstrument(selectInstrumentById.get(normalizedId)) };
+    },
+
+    updateInstrument(id, patch = {}) {
+      const existing = selectInstrumentById.get(id);
+      if (!existing) return { ok: false, reason: 'not_found' };
+      const next = {
+        code: patch.code ?? existing.code,
+        name: patch.name ?? existing.name,
+        model: patch.model ?? existing.model,
+        location: patch.location ?? existing.location,
+        status: patch.status ?? existing.status,
+        manager: patch.manager ?? existing.manager,
+        category: patch.category ?? existing.category,
+        utilization: patch.utilization ?? existing.utilization,
+      };
+      if (!String(next.name || '').trim()) return { ok: false, reason: 'missing_name' };
+      updateInstrument.run(
+        String(next.code || '').trim(),
+        String(next.name).trim(),
+        String(next.model || '').trim(),
+        String(next.location || '').trim(),
+        String(next.status || 'available').trim() || 'available',
+        String(next.manager || '').trim(),
+        String(next.category || '').trim(),
+        Number(next.utilization || 0),
+        id,
+      );
+      return { ok: true, instrument: publicInstrument(selectInstrumentById.get(id)) };
+    },
+
+    deleteInstrument(id) {
+      const existing = selectInstrumentById.get(id);
+      if (!existing) return { ok: false, reason: 'not_found' };
+      const { n } = countBookingsForInstrument.get(id);
+      if (n > 0) return { ok: false, reason: 'has_bookings' };
+      deleteInstrument.run(id);
+      return { ok: true };
     },
 
     activeBooking({ instrumentId, applicant, date, time }) {
@@ -194,6 +350,49 @@ export function createApi(db) {
 
     bookingById(id) {
       return publicBooking(selectById.get(id));
+    },
+
+    listBookings() {
+      return selectAllBookings.all().map(publicBooking);
+    },
+
+    // 管理后台改预约：改仪器 / 申请人 / 用途 / 日期 / 时段 / 状态。
+    updateBooking(id, patch = {}) {
+      const existing = selectById.get(id);
+      if (!existing) return { ok: false, reason: 'not_found' };
+      const next = {
+        instrument_id: patch.instrumentId ?? existing.instrument_id,
+        applicant: patch.applicant ?? existing.applicant,
+        purpose: patch.purpose ?? existing.purpose,
+        date: patch.date ?? existing.date,
+        start: patch.start ?? existing.start,
+        end: patch.end ?? existing.end,
+        status: patch.status ?? existing.status,
+      };
+      if (!String(next.date || '').trim() || !String(next.start || '').trim() || !String(next.end || '').trim()) {
+        return { ok: false, reason: 'missing_fields' };
+      }
+      const nextStatus = String(next.status || 'active');
+      if (nextStatus === 'cancelled' && existing.check_in_at) {
+        return { ok: false, reason: 'already_checked_in' };
+      }
+      updateBooking.run(
+        String(next.instrument_id),
+        String(next.applicant),
+        String(next.purpose || ''),
+        String(next.date),
+        String(next.start),
+        String(next.end),
+        nextStatus,
+        id,
+      );
+      // 让 cancelled_at 与 status 保持一致：取消则记时间，恢复有效则清空。
+      if (nextStatus === 'cancelled' && !existing.cancelled_at) {
+        db.prepare('UPDATE bookings SET cancelled_at = ? WHERE id = ?').run(new Date().toISOString(), id);
+      } else if (nextStatus !== 'cancelled' && existing.cancelled_at) {
+        db.prepare('UPDATE bookings SET cancelled_at = NULL WHERE id = ?').run(id);
+      }
+      return { ok: true, booking: publicBooking(selectById.get(id)) };
     },
 
     // 回写扫码上机 / 下机时间。返回 { ok, reason }。
@@ -225,7 +424,7 @@ export function createApi(db) {
     createBooking({ instrumentId, applicant, purpose, date, start, end }) {
       const user = findUserByName.get(String(applicant || '').trim());
       if (!user) return { ok: false, reason: 'applicant_not_registered' };
-      const known = SEED_INSTRUMENTS.some((item) => item.id === instrumentId);
+      const known = selectInstrumentById.get(instrumentId);
       if (!known) return { ok: false, reason: 'unknown_instrument' };
       const id = `BK-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
       insertBooking.run(id, instrumentId, user.name, purpose || '', date, start, end, new Date().toISOString());
