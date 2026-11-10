@@ -11,8 +11,10 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   return `${salt}:${hash}`;
 }
 
+const NO_PASSWORD = 'none';
+
 function verifyPassword(password, stored) {
-  if (!stored || !stored.includes(':')) return false;
+  if (!stored || stored === NO_PASSWORD || !stored.includes(':')) return false;
   const [salt, hash] = stored.split(':');
   const candidate = crypto.scryptSync(String(password), salt, 32).toString('hex');
   const a = Buffer.from(hash, 'hex');
@@ -228,6 +230,10 @@ function publicBooking(row) {
 
 export function createApi(db) {
   const findUserByName = db.prepare('SELECT * FROM users WHERE name = ?');
+  const findUserById = db.prepare('SELECT * FROM users WHERE id = ?');
+  const insertUser = db.prepare(
+    'INSERT INTO users (id, name, email, password_hash, role, is_admin) VALUES (?, ?, ?, ?, ?, 0)',
+  );
   const insertBooking = db.prepare(
     `INSERT INTO bookings
       (id, instrument_id, applicant, purpose, date, start, end, status, created_at)
@@ -296,10 +302,35 @@ export function createApi(db) {
     authenticate(name, password) {
       const row = findUserByName.get(String(name || '').trim());
       if (!row) return { ok: false, reason: 'not_registered' };
-      if (password && !verifyPassword(password, row.password_hash)) {
+      const given = String(password || '');
+      if (row.password_hash === NO_PASSWORD) {
+        if (given) return { ok: false, reason: 'no_password' };
+        return { ok: true, user: publicUser(row) };
+      }
+      if (!given || !verifyPassword(given, row.password_hash)) {
         return { ok: false, reason: 'bad_password' };
       }
       return { ok: true, user: publicUser(row) };
+    },
+
+    userById(id) {
+      return publicUser(findUserById.get(id));
+    },
+
+    registerUser({ name, password, email }) {
+      const cleanName = String(name || '').trim();
+      const cleanEmail = String(email || '').trim();
+      const cleanPassword = String(password || '');
+      if (!cleanName || cleanName.length > 40) return { ok: false, reason: 'bad_name' };
+      if (cleanPassword && (cleanPassword.length < 6 || cleanPassword.length > 72)) {
+        return { ok: false, reason: 'bad_password' };
+      }
+      if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return { ok: false, reason: 'bad_email' };
+      if (findUserByName.get(cleanName)) return { ok: false, reason: 'name_taken' };
+      const id = `user_${crypto.randomBytes(6).toString('hex')}`;
+      const storedPassword = cleanPassword ? hashPassword(cleanPassword) : NO_PASSWORD;
+      insertUser.run(id, cleanName, cleanEmail, storedPassword, '实验室成员');
+      return { ok: true, user: publicUser(findUserById.get(id)) };
     },
 
     // 管理后台登录：必须是 is_admin 用户。

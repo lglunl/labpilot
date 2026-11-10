@@ -225,19 +225,30 @@ function readJsonBody(req, limit = 4 * 1024 * 1024) {
 const adminSessions = new Map();
 const ADMIN_TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 
-function adminTokenFromHeader(header = '') {
+function readSession(header = '') {
   const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!token || !adminSessions.has(token)) return false;
+  if (!token || !adminSessions.has(token)) return null;
   const session = adminSessions.get(token);
   if (Date.now() - session.at > ADMIN_TOKEN_TTL_MS) {
     adminSessions.delete(token);
-    return false;
+    return null;
   }
-  return true;
+  return session;
+}
+
+function issueSession(user) {
+  const token = crypto.randomBytes(24).toString('hex');
+  adminSessions.set(token, {
+    userId: user.id,
+    name: user.name,
+    isAdmin: Boolean(user.isAdmin),
+    at: Date.now(),
+  });
+  return token;
 }
 
 function authorizeAdmin(req) {
-  return adminTokenFromHeader(req.headers.authorization || '');
+  return Boolean(readSession(req.headers.authorization || '')?.isAdmin);
 }
 
 // 数据接口鉴权：设置了 LAB_API_TOKEN 时，请求需带 Authorization: Bearer <token>。
@@ -246,7 +257,7 @@ function authorizeAdmin(req) {
 function authorize(req) {
   const header = req.headers.authorization || '';
   if (CONFIG.apiToken && header === `Bearer ${CONFIG.apiToken}`) return true;
-  if (adminTokenFromHeader(header)) return true;
+  if (readSession(header)) return true;
   return !CONFIG.apiToken;
 }
 
@@ -384,8 +395,7 @@ const server = http.createServer(async (req, res) => {
           : '该账号不存在';
         return sendJson(res, 200, { ok: false, reason: result.reason, message });
       }
-      const token = crypto.randomBytes(24).toString('hex');
-      adminSessions.set(token, { userId: result.user.id, name: result.user.name, at: Date.now() });
+      const token = issueSession(result.user);
       log('info', '管理后台登录', `user=${result.user.name}`);
       return sendJson(res, 200, { ok: true, token, user: result.user });
     }
@@ -468,7 +478,53 @@ const server = http.createServer(async (req, res) => {
 
   // ---------- 预约数据接口（供扫码 agent 与本机前端调用） ----------
   if (pathname.startsWith('/api/users') || pathname.startsWith('/api/bookings') || pathname === '/api/instruments') {
-    if (!authorize(req)) return sendJson(res, 401, { error: '未授权' });
+    const publicRead = req.method === 'GET' && (
+      pathname === '/api/instruments' || /^\/api\/bookings\/instrument\/[^/]+$/.test(pathname)
+    );
+    const openAuth = req.method === 'POST' && (
+      pathname === '/api/users/login' || pathname === '/api/users/register'
+    );
+
+    if (pathname === '/api/users/me' && req.method === 'GET') {
+      const session = readSession(req.headers.authorization || '');
+      if (!session) return sendJson(res, 401, { error: '未登录' });
+      const user = dbApi.userById(session.userId);
+      if (!user) return sendJson(res, 401, { error: '未登录' });
+      return sendJson(res, 200, { ok: true, user });
+    }
+
+    if (!publicRead && !openAuth && !authorize(req)) return sendJson(res, 401, { error: '未授权' });
+
+    if (pathname === '/api/users/register' && req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.registerUser(body || {});
+      if (!result.ok) {
+        const message = result.reason === 'name_taken' ? '这个姓名已经注册过'
+          : result.reason === 'bad_email' ? '邮箱格式不正确'
+          : result.reason === 'bad_password' ? '密码可以不填；如果填写，至少 6 位'
+          : '请填写姓名';
+        return sendJson(res, 200, { ok: false, reason: result.reason, message });
+      }
+      const token = issueSession(result.user);
+      log('info', '用户注册', `user=${result.user.name}`);
+      return sendJson(res, 201, { ok: true, token, user: result.user });
+    }
+
+    if (pathname === '/api/users/login' && req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.authenticate(body?.name, body?.password);
+      if (!result.ok) {
+        const message = result.reason === 'bad_password' ? '密码不正确'
+          : result.reason === 'no_password' ? '这个账号没有设置密码，请留空'
+          : '该账号未注册';
+        return sendJson(res, 200, { ok: false, reason: result.reason, message });
+      }
+      const token = issueSession(result.user);
+      log('info', '用户登录', `user=${result.user.name}`);
+      return sendJson(res, 200, { ok: true, token, user: result.user });
+    }
 
     if (pathname === '/api/instruments' && req.method === 'GET') {
       return sendJson(res, 200, { instruments: dbApi.listInstruments() });
@@ -479,7 +535,9 @@ const server = http.createServer(async (req, res) => {
       try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
       const result = dbApi.authenticate(body?.name, body?.password);
       if (!result.ok) {
-        const message = result.reason === 'bad_password' ? '密码不正确' : '该用户未注册';
+        const message = result.reason === 'bad_password' ? '密码不正确'
+          : result.reason === 'no_password' ? '这个账号没有设置密码，请留空'
+          : '该用户未注册';
         return sendJson(res, 200, { ok: false, reason: result.reason, message });
       }
       return sendJson(res, 200, { ok: true, user: result.user });
