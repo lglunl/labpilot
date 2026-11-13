@@ -1,5 +1,23 @@
 # 待办
 
+## 公网访问：quick tunnel → 固定网址
+
+当前预约服务器用 Cloudflare quick tunnel（`cloudflared tunnel --url ...`）对外暴露，
+生成的是每次重启都会变的 `*.trycloudflare.com` 临时网址。
+
+要改成固定网址（重启不变），方案如下，待择机实施：
+
+- 方案 A（推荐）：Cloudflare 命名隧道（named tunnel）
+  - 需登录 Cloudflare 账号并准备一个自有域名。
+  - `cloudflared tunnel create <name>` 生成固定 `*.cftunnel` 或绑定自有域名；
+  - 设备电脑端 `booking_api_base` 改成固定域名后无需再改。
+- 方案 B：租用云服务器（有公网 IP / 绑定域名），把 labpilot 直接部署上去。
+- 方案 C：有自有域名时用 Cloudflare DNS + Tunnel，或直接给服务器配公网 IP + 域名解析。
+
+实施时要同步改每台设备电脑 `config.json` 里的 `booking_api_base`。
+
+参见 `docs/DEPLOYMENT.md`。
+
 ## 数据层迁移到 MySQL
 
 当前预约后台用的是 Node 内置 `node:sqlite`，数据存在单个文件 `data/labpilot.sqlite`（见 `server/db.js`）。
