@@ -9,7 +9,7 @@
   <link rel="icon" href="assets/lab-mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
 </head>
-<body>
+<body class="auth-open">
   <svg class="icon-sprite" aria-hidden="true">
     <symbol id="icon-message" viewBox="0 0 24 24">
       <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>
@@ -121,6 +121,39 @@
     </symbol>
   </svg>
 
+  <div class="auth-gate" id="auth-gate">
+    <form class="auth-card" id="auth-form">
+      <div class="auth-brand">
+        <img src="assets/lab-mark.svg" alt="" width="44" height="44">
+        <div>
+          <strong>LabPilot</strong>
+          <small>实验室预约</small>
+        </div>
+      </div>
+      <h1 id="auth-title">登录</h1>
+      <p class="auth-lead" id="auth-lead">使用已注册的姓名进入。设置过密码的账号需要填写密码。</p>
+      <label class="form-field">
+        <span>姓名</span>
+        <input id="auth-name" name="name" type="text" autocomplete="username" required maxlength="40">
+      </label>
+      <label class="form-field auth-register-only">
+        <span>邮箱（选填）</span>
+        <input id="auth-email" name="email" type="email" autocomplete="email" maxlength="80">
+      </label>
+      <label class="form-field">
+        <span id="auth-password-label">密码</span>
+        <input id="auth-password" name="password" type="password" autocomplete="current-password">
+      </label>
+      <label class="form-field auth-register-only">
+        <span>确认密码（选填）</span>
+        <input id="auth-password2" name="password2" type="password" autocomplete="new-password">
+      </label>
+      <div class="form-error" id="auth-error"></div>
+      <button class="button button-primary auth-submit" id="auth-submit" type="submit">登录</button>
+      <button class="auth-switch" id="auth-switch" type="button" data-action="auth-switch">没有账号？去注册</button>
+    </form>
+  </div>
+
   <div class="app-shell" id="app-shell">
     <aside class="sidebar" id="sidebar">
       <div class="brand-row">
@@ -194,7 +227,7 @@
 
       <div class="sidebar-footer">
         <button class="user-chip" type="button" id="user-menu-button">
-          <span class="avatar avatar-green">林</span>
+          <span class="avatar avatar-green" id="user-avatar">用</span>
           <span class="user-copy">
             <strong>林雨</strong>
             <small>课题组 · 管理员</small>

@@ -8,6 +8,10 @@ import { SUMMARY_SCHEMA, normalizeSummary, isUsableSummary } from './schema.js';
 import { ruleSummary } from './fallback.js';
 import { createStaticHandler } from './static.js';
 import { openDatabase, createApi } from './db.js';
+import QRCode from 'qrcode';
+import {
+  phonePage, loginBody, checkInBody, occupiedBody, checkedInBody, checkOutBody, doneBody,
+} from './phone.js';
 
 const dbApi = createApi(openDatabase());
 
@@ -25,6 +29,7 @@ const CONFIG = {
   maxQueue: Number(process.env.MAX_QUEUE || 3),
   cacheTtlMs: Number(process.env.CACHE_TTL_MS || 10 * 60_000),
   apiToken: process.env.LAB_API_TOKEN || '',
+  publicBaseUrl: (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, ''),
 };
 
 const log = (level, message, extra = '') => {
@@ -223,19 +228,86 @@ function readJsonBody(req, limit = 4 * 1024 * 1024) {
 const adminSessions = new Map();
 const ADMIN_TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 
-function adminTokenFromHeader(header = '') {
+function readCookie(req, name) {
+  const header = req.headers.cookie || '';
+  for (const part of header.split(';')) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) return decodeURIComponent(rest.join('='));
+  }
+  return '';
+}
+
+function userFromCookie(req) {
+  const token = readCookie(req, 'labpilot_scan');
+  const session = token ? readSession(`Bearer ${token}`) : null;
+  if (!session) return null;
+  return dbApi.userById(session.userId);
+}
+
+function sessionCookie(token) {
+  return `labpilot_scan=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200`;
+}
+
+async function readRawBody(req, limit = 1_000_000) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error('请求体过大'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+async function readFormBody(req) {
+  const text = await readRawBody(req);
+  const type = String(req.headers['content-type'] || '');
+  if (type.includes('application/json')) {
+    if (!text) return {};
+    return JSON.parse(text);
+  }
+  const params = new URLSearchParams(text);
+  return Object.fromEntries(params.entries());
+}
+
+function redirectSeeOther(res, location, cookie) {
+  const headers = { Location: location, 'Cache-Control': 'no-store' };
+  if (cookie) headers['Set-Cookie'] = cookie;
+  res.writeHead(303, headers);
+  res.end();
+}
+
+function readSession(header = '') {
   const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!token || !adminSessions.has(token)) return false;
+  if (!token || !adminSessions.has(token)) return null;
   const session = adminSessions.get(token);
   if (Date.now() - session.at > ADMIN_TOKEN_TTL_MS) {
     adminSessions.delete(token);
-    return false;
+    return null;
   }
-  return true;
+  return session;
+}
+
+function issueSession(user) {
+  const token = crypto.randomBytes(24).toString('hex');
+  adminSessions.set(token, {
+    userId: user.id,
+    name: user.name,
+    isAdmin: Boolean(user.isAdmin),
+    at: Date.now(),
+  });
+  return token;
 }
 
 function authorizeAdmin(req) {
-  return adminTokenFromHeader(req.headers.authorization || '');
+  return Boolean(readSession(req.headers.authorization || '')?.isAdmin);
 }
 
 // 数据接口鉴权：设置了 LAB_API_TOKEN 时，请求需带 Authorization: Bearer <token>。
@@ -244,7 +316,7 @@ function authorizeAdmin(req) {
 function authorize(req) {
   const header = req.headers.authorization || '';
   if (CONFIG.apiToken && header === `Bearer ${CONFIG.apiToken}`) return true;
-  if (adminTokenFromHeader(header)) return true;
+  if (readSession(header)) return true;
   return !CONFIG.apiToken;
 }
 
@@ -270,6 +342,61 @@ function sendJson(res, status, payload) {
   res.end(text);
 }
 
+function sendHtml(res, status, html) {
+  res.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(html);
+}
+
+function escapeHtml(value = '') {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function offlinePage(title, message) {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f3f5f1; color: #17231f; font-family: "Microsoft YaHei UI", sans-serif; }
+    main { max-width: 420px; padding: 28px; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    p { margin: 0; line-height: 1.6; color: #37453f; }
+  </style>
+</head>
+<body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main></body>
+</html>`;
+}
+
+// 二维码必须指向稳定入口。优先用 PUBLIC_BASE_URL；管理员从隧道域名打开后台时，用当前访问地址。
+function publicBaseUrl(req) {
+  if (CONFIG.publicBaseUrl) return CONFIG.publicBaseUrl;
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  if (!host || host.startsWith('127.0.0.1') || host.startsWith('localhost')) return '';
+  const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+  return `${proto}://${host}`.replace(/\/+$/, '');
+}
+
+async function instrumentQrSvg(req, id) {
+  const base = publicBaseUrl(req);
+  const instrument = dbApi.instrumentById(id);
+  if (!instrument) return { ok: false, status: 404, message: '设备不存在' };
+  if (!base) {
+    return { ok: false, status: 400, message: '未配置 PUBLIC_BASE_URL，无法生成可打印的二维码' };
+  }
+  const target = `${base}/s/${encodeURIComponent(instrument.id)}`;
+  const svg = await QRCode.toString(target, { type: 'svg', margin: 1, errorCorrectionLevel: 'M', width: 320 });
+  return { ok: true, svg, filename: `${instrument.code || instrument.id}.svg`, target };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname;
@@ -285,6 +412,129 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  const scanMatch = pathname.match(/^\/s\/([^/]+)(?:\/(login|check-in|check-out|in|out))?$/);
+  if (scanMatch) {
+    const instrument = dbApi.instrumentById(decodeURIComponent(scanMatch[1]));
+    const action = scanMatch[2] || '';
+    if (!instrument) return sendHtml(res, 404, offlinePage('找不到这台仪器', '二维码对应的仪器不存在。'));
+    const page = (status, title, body) => sendHtml(res, status, phonePage({
+      title, instrumentName: instrument.name, body,
+    }));
+    const user = userFromCookie(req);
+
+    if (req.method === 'GET' && action === 'in') {
+      const open = dbApi.openCheckIn(instrument.id);
+      if (!user || !open || open.applicant !== user.name) {
+        redirectSeeOther(res, `/s/${encodeURIComponent(instrument.id)}`);
+        return;
+      }
+      return page(200, '已上机', checkedInBody(open));
+    }
+    if (req.method === 'GET' && action === 'out') {
+      return page(200, '已下机', '<p class="ok">已下机</p><p>这次上机已经结束。</p>');
+    }
+    if (req.method === 'POST' && action === 'login') {
+      let body;
+      try { body = await readFormBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.authenticate(body?.name, body?.password);
+      if (!result.ok) {
+        const message = result.reason === 'bad_password' ? '密码不正确'
+          : result.reason === 'no_password' ? '这个账号没有设置密码，请留空'
+          : '该账号未注册';
+        return page(403, '登录', loginBody(instrument.id, message));
+      }
+      const token = issueSession(result.user);
+      log('info', '扫码页登录', `user=${result.user.name} instrument=${instrument.id}`);
+      redirectSeeOther(res, `/s/${encodeURIComponent(instrument.id)}`, sessionCookie(token));
+      return;
+    }
+    if (req.method === 'POST' && action === 'check-in') {
+      if (!user) {
+        redirectSeeOther(res, `/s/${encodeURIComponent(instrument.id)}`);
+        return;
+      }
+      const open = dbApi.openCheckIn(instrument.id);
+      if (open) {
+        redirectSeeOther(res, `/s/${encodeURIComponent(instrument.id)}`);
+        return;
+      }
+      const booking = dbApi.activeBooking({
+        instrumentId: instrument.id, applicant: user.name, date: todayKey(), time: nowTime(),
+      });
+      if (!booking) return page(403, '上机', checkInBody(null, false, '当前时间没有这台仪器的有效预约，不能上机。'));
+      const result = dbApi.recordScan(booking.id, 'check-in');
+      if (!result.ok) return page(400, '上机', checkInBody(null, false, '上机没有成功，请再扫一次。'));
+      log('info', '扫码上机', `booking=${booking.id} user=${user.name}`);
+      redirectSeeOther(res, `/s/${encodeURIComponent(instrument.id)}/in`);
+      return;
+    }
+    if (req.method === 'POST' && action === 'check-out') {
+      if (!user) {
+        redirectSeeOther(res, `/s/${encodeURIComponent(instrument.id)}`);
+        return;
+      }
+      let body;
+      try { body = await readFormBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const open = dbApi.openCheckIn(instrument.id);
+      if (!open || open.applicant !== user.name) {
+        redirectSeeOther(res, `/s/${encodeURIComponent(instrument.id)}`);
+        return;
+      }
+      const result = dbApi.recordScan(open.id, 'check-out');
+      if (!result.ok) return page(400, '下机', '<p class="error">下机没有成功，请再扫一次。</p>');
+      dbApi.setScanMail(open.id, body?.email);
+      log('info', '扫码下机', `booking=${open.id} user=${user.name}`);
+      redirectSeeOther(res, `/s/${encodeURIComponent(instrument.id)}/out`);
+      return;
+    }
+    if (req.method === 'GET' && !action) {
+      dbApi.openScan(instrument.id);
+      log('info', '扫码访问', `instrument=${instrument.id}`);
+      if (!user) return page(200, '登录', loginBody(instrument.id, ''));
+      const open = dbApi.openCheckIn(instrument.id);
+      if (open && open.applicant === user.name) return page(200, '下机', checkOutBody(open));
+      if (open) return page(200, '上机', occupiedBody(open.applicant));
+      const booking = dbApi.activeBooking({
+        instrumentId: instrument.id, applicant: user.name, date: todayKey(), time: nowTime(),
+      });
+      if (!booking) return page(200, '上机', checkInBody(null, false, '当前时间没有这台仪器的有效预约，不能上机。'));
+      return page(200, '上机', checkInBody(booking, true, ''));
+    }
+    return sendJson(res, 405, { error: '不支持的请求' });
+  }
+
+  const deskMatch = pathname.match(/^\/api\/instruments\/([^/]+)\/desk$/);
+  if (deskMatch) {
+    if (!authorize(req)) return sendJson(res, 401, { error: '未授权' });
+    const instrumentId = decodeURIComponent(deskMatch[1]);
+    if (req.method === 'GET') {
+      const result = dbApi.desk(instrumentId);
+      if (!result.ok) return sendJson(res, 404, { ok: false, message: '仪器不存在' });
+      return sendJson(res, 200, result);
+    }
+    if (req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.reportDesk(instrumentId, body || {});
+      if (!result.ok) return sendJson(res, 404, { ok: false, message: '预约不存在' });
+      return sendJson(res, 200, result);
+    }
+  }
+
+  const presenceMatch = pathname.match(/^\/api\/instruments\/([^/]+)\/presence$/);
+  if (presenceMatch && req.method === 'POST') {
+    if (!authorize(req)) return sendJson(res, 401, { error: '未授权' });
+    let body;
+    try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+    const result = dbApi.recordPresence(decodeURIComponent(presenceMatch[1]), body?.publicUrl);
+    if (!result.ok) {
+      const message = result.reason === 'bad_url' ? '公网地址不合法' : '仪器不存在';
+      return sendJson(res, result.reason === 'bad_url' ? 400 : 404, { ok: false, reason: result.reason, message });
+    }
+    log('info', '设备登记扫码地址', `instrument=${result.instrument.id}`);
+    return sendJson(res, 200, { ok: true, instrument: result.instrument });
+  }
+
   // ---------- 管理后台接口（admin 会话鉴权，独立于 LAB_API_TOKEN） ----------
   if (pathname.startsWith('/api/admin')) {
     if (pathname === '/api/admin/login' && req.method === 'POST') {
@@ -297,8 +547,7 @@ const server = http.createServer(async (req, res) => {
           : '该账号不存在';
         return sendJson(res, 200, { ok: false, reason: result.reason, message });
       }
-      const token = crypto.randomBytes(24).toString('hex');
-      adminSessions.set(token, { userId: result.user.id, name: result.user.name, at: Date.now() });
+      const token = issueSession(result.user);
       log('info', '管理后台登录', `user=${result.user.name}`);
       return sendJson(res, 200, { ok: true, token, user: result.user });
     }
@@ -365,12 +614,69 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/admin/users' && req.method === 'GET') {
       return sendJson(res, 200, { users: dbApi.listUsers() });
     }
+    const qrMatch = pathname.match(/^\/api\/admin\/instruments\/([^/]+)\/qr\.svg$/);
+    if (qrMatch && req.method === 'GET') {
+      const result = await instrumentQrSvg(req, decodeURIComponent(qrMatch[1]));
+      if (!result.ok) return sendJson(res, result.status || 400, { ok: false, message: result.message });
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${result.filename}"`,
+        'Cache-Control': 'no-store',
+      });
+      return res.end(result.svg);
+    }
     return sendJson(res, 404, { error: '接口不存在' });
   }
 
   // ---------- 预约数据接口（供扫码 agent 与本机前端调用） ----------
   if (pathname.startsWith('/api/users') || pathname.startsWith('/api/bookings') || pathname === '/api/instruments') {
-    if (!authorize(req)) return sendJson(res, 401, { error: '未授权' });
+    const publicRead = req.method === 'GET' && (
+      pathname === '/api/instruments' || /^\/api\/bookings\/instrument\/[^/]+$/.test(pathname)
+    );
+    const openAuth = req.method === 'POST' && (
+      pathname === '/api/users/login' || pathname === '/api/users/register'
+    );
+
+    if (pathname === '/api/users/me' && req.method === 'GET') {
+      const session = readSession(req.headers.authorization || '');
+      if (!session) return sendJson(res, 401, { error: '未登录' });
+      const user = dbApi.userById(session.userId);
+      if (!user) return sendJson(res, 401, { error: '未登录' });
+      return sendJson(res, 200, { ok: true, user });
+    }
+
+    if (!publicRead && !openAuth && !authorize(req)) return sendJson(res, 401, { error: '未授权' });
+
+    if (pathname === '/api/users/register' && req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.registerUser(body || {});
+      if (!result.ok) {
+        const message = result.reason === 'name_taken' ? '这个姓名已经注册过'
+          : result.reason === 'bad_email' ? '邮箱格式不正确'
+          : result.reason === 'bad_password' ? '密码可以不填；如果填写，至少 6 位'
+          : '请填写姓名';
+        return sendJson(res, 200, { ok: false, reason: result.reason, message });
+      }
+      const token = issueSession(result.user);
+      log('info', '用户注册', `user=${result.user.name}`);
+      return sendJson(res, 201, { ok: true, token, user: result.user });
+    }
+
+    if (pathname === '/api/users/login' && req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.authenticate(body?.name, body?.password);
+      if (!result.ok) {
+        const message = result.reason === 'bad_password' ? '密码不正确'
+          : result.reason === 'no_password' ? '这个账号没有设置密码，请留空'
+          : '该账号未注册';
+        return sendJson(res, 200, { ok: false, reason: result.reason, message });
+      }
+      const token = issueSession(result.user);
+      log('info', '用户登录', `user=${result.user.name}`);
+      return sendJson(res, 200, { ok: true, token, user: result.user });
+    }
 
     if (pathname === '/api/instruments' && req.method === 'GET') {
       return sendJson(res, 200, { instruments: dbApi.listInstruments() });
@@ -381,7 +687,9 @@ const server = http.createServer(async (req, res) => {
       try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
       const result = dbApi.authenticate(body?.name, body?.password);
       if (!result.ok) {
-        const message = result.reason === 'bad_password' ? '密码不正确' : '该用户未注册';
+        const message = result.reason === 'bad_password' ? '密码不正确'
+          : result.reason === 'no_password' ? '这个账号没有设置密码，请留空'
+          : '该用户未注册';
         return sendJson(res, 200, { ok: false, reason: result.reason, message });
       }
       return sendJson(res, 200, { ok: true, user: result.user });

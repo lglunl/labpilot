@@ -3,6 +3,7 @@
 
   const STORAGE_KEY = 'labpilot_demo_state_v1';
   const ADMIN_SESSION_KEY = 'labpilot_admin_session_v1';
+  const USER_SESSION_KEY = 'labpilot_user_session_v1';
   const appShell = document.getElementById('app-shell');
   const viewRoot = document.getElementById('view-root');
   const contextPanel = document.getElementById('context-panel');
@@ -347,52 +348,7 @@
           }
         }
       ],
-      instruments: [
-        {
-          id: 'inst_fc',
-          code: 'FC-01',
-          name: '流式细胞仪',
-          model: 'BD FACSCelesta',
-          location: 'B2-107',
-          status: 'available',
-          manager: '陈老师',
-          category: '细胞分析',
-          utilization: 78
-        },
-        {
-          id: 'inst_clsm',
-          code: 'CLSM-02',
-          name: '激光共聚焦显微镜',
-          model: 'Zeiss LSM 900',
-          location: 'B2-109',
-          status: 'in-use',
-          manager: '周群',
-          category: '显微成像',
-          utilization: 86
-        },
-        {
-          id: 'inst_pcr',
-          code: 'PCR-03',
-          name: '实时荧光定量 PCR',
-          model: 'QuantStudio 5',
-          location: 'A1-203',
-          status: 'available',
-          manager: '王晨',
-          category: '分子检测',
-          utilization: 64
-        },
-        {
-          id: 'inst_centrifuge',
-          code: 'CENT-04',
-          name: '高速冷冻离心机',
-          model: 'Eppendorf 5910Ri',
-          location: 'B1-102',
-          status: 'maintenance',
-          manager: '陈老师',
-          category: '样品处理',
-          utilization: 52
-        }
-      ],
+      instruments: [],
       bookings: [],
       auditEvents: [],
       summaries: {}
@@ -417,6 +373,9 @@
       parsed.groups.forEach((group) => {
         if (!group.botRole) group.botRole = 'general';
       });
+      // 设备和预约只以后台为准，丢掉浏览器里残留的演示数据。
+      parsed.instruments = [];
+      parsed.bookings = [];
       return parsed;
     } catch {
       return buildSeedState();
@@ -457,13 +416,137 @@
     }
   }
 
+  let userSession = loadUserSession();
+
+  function loadUserSession() {
+    try {
+      const raw = localStorage.getItem(USER_SESSION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && parsed.token && parsed.user ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveUserSession(session) {
+    userSession = session;
+    try {
+      if (session) localStorage.setItem(USER_SESSION_KEY, JSON.stringify(session));
+      else localStorage.removeItem(USER_SESSION_KEY);
+    } catch {
+      // Storage unavailable.
+    }
+  }
+
+  function applyAccount(user) {
+    state.currentUser = {
+      id: user.id,
+      name: user.name,
+      initials: String(user.name || '用').slice(0, 1),
+      role: user.role || '实验室成员'
+    };
+    saveState();
+  }
+
+  function enterApp(user, token) {
+    saveUserSession({ token, user });
+    saveAdminSession(user.isAdmin ? { token, user } : null);
+    applyAccount(user);
+    if (!user.isAdmin && state.currentView === 'admin') state.currentView = 'chat';
+    document.body.classList.remove('auth-open');
+    renderView();
+  }
+
+  let authMode = 'login';
+
+  function setAuthMode(mode) {
+    authMode = mode === 'register' ? 'register' : 'login';
+    const form = $('#auth-form');
+    if (!form) return;
+    form.classList.toggle('is-register', authMode === 'register');
+    const title = $('#auth-title');
+    const lead = $('#auth-lead');
+    const submit = $('#auth-submit');
+    const switcher = $('#auth-switch');
+    const password = $('#auth-password');
+    const confirm = $('#auth-password2');
+    if (title) title.textContent = authMode === 'register' ? '注册' : '登录';
+    if (lead) {
+      lead.textContent = authMode === 'register'
+        ? '姓名必填。邮箱和密码可以不填。'
+        : '使用已注册的姓名进入。设置过密码的账号需要填写密码。';
+    }
+    if (submit) submit.textContent = authMode === 'register' ? '注册并进入' : '登录';
+    if (switcher) switcher.textContent = authMode === 'register' ? '已有账号？去登录' : '没有账号？去注册';
+    const passwordLabel = $('#auth-password-label');
+    if (passwordLabel) passwordLabel.textContent = authMode === 'register' ? '密码（选填）' : '密码';
+    if (password) {
+      password.required = false;
+      password.setAttribute('autocomplete', authMode === 'register' ? 'new-password' : 'current-password');
+    }
+    if (confirm) confirm.required = false;
+    const error = $('#auth-error');
+    if (error) {
+      error.textContent = '';
+      error.classList.remove('is-visible');
+    }
+  }
+
+  function showAuthGate(mode = 'login') {
+    document.body.classList.add('auth-open');
+    setAuthMode(mode);
+  }
+
+  function logoutUser() {
+    saveUserSession(null);
+    saveAdminSession(null);
+    closeModal();
+    showAuthGate('login');
+  }
+
+  async function handleAuthSubmit(form) {
+    const formData = new FormData(form);
+    const name = String(formData.get('name') || '').trim();
+    const password = String(formData.get('password') || '');
+    const email = String(formData.get('email') || '').trim();
+    const password2 = String(formData.get('password2') || '');
+    const error = $('#auth-error');
+    const fail = (message) => {
+      error.textContent = message;
+      error.classList.add('is-visible');
+    };
+    error.classList.remove('is-visible');
+    if (!name) return fail('请填写姓名。');
+    if (authMode === 'register' && (password || password2)) {
+      if (password.length < 6) return fail('密码可以不填；如果填写，至少 6 位。');
+      if (password !== password2) return fail('两次输入的密码不一致。');
+    }
+    const path = authMode === 'register' ? '/api/users/register' : '/api/users/login';
+    const body = authMode === 'register' ? { name, password, email } : { name, password };
+    try {
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!payload.ok) return fail(payload.message || '提交失败，请重试。');
+      enterApp(payload.user, payload.token);
+      toast(authMode === 'register' ? `注册成功，欢迎 ${payload.user.name}` : `已登录：${payload.user.name}`);
+    } catch {
+      fail('预约服务暂时不可用。');
+    }
+  }
+
   function isAdminLoggedIn() {
     return Boolean(adminSession && adminSession.token);
   }
 
   function authHeaders(extra = {}) {
     const headers = { ...extra };
-    if (adminSession && adminSession.token) headers.Authorization = `Bearer ${adminSession.token}`;
+    const token = userSession?.token || adminSession?.token;
+    if (token) headers.Authorization = `Bearer ${token}`;
     return headers;
   }
 
@@ -639,9 +722,12 @@
         <small>${escapeHtml(state.currentUser.role)}</small>
       `;
     }
+    const userAvatar = $('#user-avatar');
+    if (userAvatar) userAvatar.textContent = state.currentUser.initials || '用';
   }
 
   function renderView() {
+    if (state.currentView === 'admin' && !isAdminLoggedIn()) state.currentView = 'chat';
     appShell.classList.toggle('no-context', state.currentView !== 'chat');
     contextPanel.classList.toggle('hidden', state.currentView !== 'chat');
 
@@ -1090,7 +1176,9 @@
     const scheduledHours = dateBookings.reduce((sum, booking) =>
       sum + parseTimeToMinutes(booking.end) - parseTimeToMinutes(booking.start), 0
     ) / 60;
-    const utilization = Math.min(100, Math.round((scheduledHours / (state.instruments.length * 12)) * 100));
+    const utilization = state.instruments.length
+      ? Math.min(100, Math.round((scheduledHours / (state.instruments.length * 12)) * 100))
+      : 0;
 
     viewRoot.innerHTML = `
       <section class="view-shell">
@@ -1123,7 +1211,7 @@
               <div class="stat-card">
                 <div class="stat-card-head"><span>可预约仪器</span><span class="stat-card-icon">${icon('flask')}</span></div>
                 <div class="stat-card-value"><strong>${availableCount}</strong><span>/ ${state.instruments.length} 台</span></div>
-                <div class="stat-card-foot">另有 1 台正在使用，1 台维护中</div>
+                <div class="stat-card-foot">${state.instruments.filter((item) => item.status === 'in-use').length} 台使用中，${state.instruments.filter((item) => item.status === 'maintenance').length} 台维护中</div>
               </div>
               <div class="stat-card">
                 <div class="stat-card-head"><span>当日预约</span><span class="stat-card-icon blue">${icon('calendar')}</span></div>
@@ -1143,7 +1231,7 @@
             </div>
             <div class="booking-layout">
               <div class="instrument-grid">
-                ${state.instruments.map((instrument) => {
+                ${state.instruments.length ? state.instruments.map((instrument) => {
                   const instrumentBookings = dateBookings.filter((booking) => booking.instrumentId === instrument.id);
                   const next = instrumentBookings[0];
                   return `
@@ -1178,7 +1266,13 @@
                       </div>
                     </article>
                   `;
-                }).join('')}
+                }).join('') : `
+                  <div class="empty-state" style="grid-column:1 / -1">
+                    <span class="empty-state-icon">${icon('flask')}</span>
+                    <strong>后台还没有设备</strong>
+                    <p>请先在管理后台添加设备，这里会显示同一份设备列表。</p>
+                  </div>
+                `}
               </div>
               <aside class="section-panel">
                 <div class="section-panel-header">
@@ -2151,6 +2245,32 @@
     `;
   }
 
+  function presenceLabel(device) {
+    if (!device.publicUrl || !device.presenceAt) return { text: '未登记', cls: 'overdue' };
+    const age = Date.now() - new Date(device.presenceAt).getTime();
+    if (Number.isFinite(age) && age < 10 * 60 * 1000) return { text: '在线', cls: 'closed' };
+    return { text: '已离线', cls: 'overdue' };
+  }
+
+  async function downloadInstrumentQr(id) {
+    const device = adminDevices.find((item) => item.id === id);
+    const response = await adminFetch(`/api/admin/instruments/${encodeURIComponent(id)}/qr.svg`);
+    if (!response) return;
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      toast(payload.message || '二维码生成失败。请先在服务器配置 PUBLIC_BASE_URL。', 'error');
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${device?.code || id}.svg`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast(`已下载 ${device?.name || id} 的二维码。`);
+  }
+
   function renderAdminDevices() {
     return `
       <div class="admin-toolbar">
@@ -2163,26 +2283,33 @@
       <div class="data-table-wrap">
         <table class="data-table">
           <thead>
-            <tr><th>设备</th><th>编号</th><th>位置</th><th>状态</th><th>负责人</th><th>类别</th><th>利用率</th><th>操作</th></tr>
+            <tr><th>设备</th><th>编号</th><th>位置</th><th>状态</th><th>扫码登记</th><th>最近扫码</th><th>操作</th></tr>
           </thead>
           <tbody>
-            ${adminDevices.map((d) => `
+            ${adminDevices.map((d) => {
+              const presence = presenceLabel(d);
+              return `
               <tr>
-                <td><div class="table-main"><strong>${escapeHtml(d.name)}</strong><small>${escapeHtml(d.model || '—')}</small></div></td>
+                <td><div class="table-main"><strong>${escapeHtml(d.name)}</strong><small>${escapeHtml(d.model || '—')} · ${escapeHtml(d.id)}</small></div></td>
                 <td>${escapeHtml(d.code || '—')}</td>
                 <td>${escapeHtml(d.location || '—')}</td>
                 <td><span class="status-badge ${d.status === 'available' ? 'closed' : d.status === 'in-use' ? 'in-use' : 'overdue'}">${escapeHtml(instrumentStatusLabel(d.status))}</span></td>
-                <td>${escapeHtml(d.manager || '—')}</td>
-                <td>${escapeHtml(d.category || '—')}</td>
-                <td>${d.utilization != null ? `${escapeHtml(String(d.utilization))}%` : '—'}</td>
+                <td>
+                  <div class="table-main">
+                    <span class="status-badge ${presence.cls}">${presence.text}</span>
+                    <small>${d.presenceAt ? escapeHtml(formatDateTime(d.presenceAt)) : '设备电脑尚未登记'}</small>
+                  </div>
+                </td>
+                <td>${d.lastScanAt ? escapeHtml(formatDateTime(d.lastScanAt)) : '—'}</td>
                 <td>
                   <div class="table-actions">
+                    <button class="button button-sm button-soft" type="button" data-action="admin-device-qr" data-device-id="${escapeHtml(d.id)}">二维码</button>
                     <button class="button button-sm button-soft" type="button" data-action="admin-device-edit" data-device-id="${escapeHtml(d.id)}">编辑</button>
                     <button class="button button-sm button-ghost" type="button" data-action="admin-device-delete" data-device-id="${escapeHtml(d.id)}">删除</button>
                   </div>
                 </td>
-              </tr>
-            `).join('') || `<tr><td colspan="8"><div class="empty-state" style="padding:28px">暂无设备</div></td></tr>`}
+              </tr>`;
+            }).join('') || `<tr><td colspan="7"><div class="empty-state" style="padding:28px">暂无设备</div></td></tr>`}
           </tbody>
         </table>
       </div>
@@ -2373,7 +2500,7 @@
           </div>
           <div class="modal-footer">
             <button class="button" type="button" data-action="close-modal">取消</button>
-            <button class="button button-primary" type="submit">${icon('check')} 保存</button>
+            <button class="button button-primary" type="button" data-action="admin-device-save">${icon('check')} 保存</button>
           </div>
         </form>
       </div>
@@ -2544,7 +2671,7 @@
             <span class="avatar avatar-green" style="width:42px;height:42px">${escapeHtml(state.currentUser.initials)}</span>
             <div class="agent-profile-copy">
               <strong>${escapeHtml(state.currentUser.name)}</strong>
-              <p>${escapeHtml(state.currentUser.role)} · 个人演示账号</p>
+              <p>${escapeHtml(state.currentUser.role)}</p>
             </div>
           </div>
           <div class="admin-entry" style="margin-bottom:16px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-soft)">
@@ -2568,6 +2695,7 @@
         <div class="modal-footer">
           <button class="button" type="button" data-action="export-ledger">${icon('file')} 导出数据</button>
           <button class="button button-danger" type="button" data-action="reset-demo">${icon('trash')} 重置演示数据</button>
+          <button class="button" type="button" data-action="user-logout">${icon('logout')} 退出登录</button>
           <button class="button button-primary" type="button" data-action="close-modal">关闭</button>
         </div>
       </div>
@@ -3211,6 +3339,14 @@
       closeModal();
       return;
     }
+    if (action === 'auth-switch') {
+      setAuthMode(authMode === 'register' ? 'login' : 'register');
+      return;
+    }
+    if (action === 'user-logout') {
+      logoutUser();
+      return;
+    }
     if (action === 'summarize-group') {
       closeModal();
       generateSummary({ agentId: getGroup().agentId });
@@ -3369,12 +3505,21 @@
       openAdminDeviceModal();
       return;
     }
+    if (action === 'admin-device-save') {
+      const form = actionTarget.closest('form');
+      if (form) handleAdminDeviceSave(form);
+      return;
+    }
     if (action === 'admin-device-edit') {
       openAdminDeviceModal(actionTarget.dataset.deviceId);
       return;
     }
     if (action === 'admin-device-delete') {
       adminDeleteDevice(actionTarget.dataset.deviceId);
+      return;
+    }
+    if (action === 'admin-device-qr') {
+      downloadInstrumentQr(actionTarget.dataset.deviceId);
       return;
     }
     if (action === 'admin-booking-edit') {
@@ -3391,7 +3536,8 @@
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
     event.preventDefault();
-    if (form.id === 'booking-form') createBookingFromForm(form);
+    if (form.id === 'auth-form') handleAuthSubmit(form);
+    else if (form.id === 'booking-form') createBookingFromForm(form);
     else if (form.id === 'import-form') handleImport(form);
     else if (form.id === 'agent-form') handleAgentCreate(form);
     else if (form.id === 'group-form') handleGroupCreate(form);
@@ -3460,73 +3606,66 @@
   });
   backdrop.addEventListener('click', closeModal);
 
-  // 启动时把后台（sqlite）里的预约合并进本地状态，保证扫码 agent 看到的预约和这里一致。
+  function bookingFromServer(booking) {
+    return {
+      id: booking.id,
+      instrumentId: booking.instrumentId,
+      groupId: state.currentGroupId,
+      applicant: booking.applicant,
+      purpose: booking.purpose || '',
+      date: booking.date,
+      start: booking.start,
+      end: booking.end,
+      checkInAt: booking.checkInAt || null,
+      checkOutAt: booking.checkOutAt || null,
+      cancelledAt: booking.cancelledAt || null,
+      scans: [],
+      createdAt: booking.createdAt || new Date().toISOString()
+    };
+  }
+
+  // 仪器和预约完全以后台列表为准。后台没有设备时，预约页也不再保留旧数据。
   async function syncBookingsFromServer() {
     try {
       const response = await fetch('/api/instruments', { headers: apiHeaders() });
       if (!response.ok) return;
       const { instruments = [] } = await response.json();
-      let changed = false;
-      // 仪器列表以后台为准：用后端返回的完整字段更新本地（id/code/name/model/location/status/manager/category/utilization）。
-      if (instruments.length) {
-        const byId = new Map(instruments.map((item) => [item.id, item]));
-        const merged = state.instruments.map((item) => {
-          const server = byId.get(item.id);
-          return server ? { ...item, ...server } : item;
-        });
-        if (JSON.stringify(merged) !== JSON.stringify(state.instruments)) {
-          state.instruments = merged;
-          changed = true;
-        }
-      }
+      const nextBookings = [];
       for (const instrument of instruments) {
         const res = await fetch(`/api/bookings/instrument/${encodeURIComponent(instrument.id)}`, { headers: apiHeaders() });
         if (!res.ok) continue;
         const { bookings = [] } = await res.json();
-        for (const booking of bookings) {
-          const existing = state.bookings.find((item) => item.id === booking.id);
-          if (existing) {
-            // 把扫码 agent 回写的上机 / 下机时间同步到本地，台账状态随之更新。
-            if (booking.checkInAt && existing.checkInAt !== booking.checkInAt) {
-              existing.checkInAt = booking.checkInAt;
-              changed = true;
-            }
-            if (booking.checkOutAt && existing.checkOutAt !== booking.checkOutAt) {
-              existing.checkOutAt = booking.checkOutAt;
-              changed = true;
-            }
-            continue;
-          }
-          state.bookings.push({
-            id: booking.id,
-            instrumentId: booking.instrumentId,
-            groupId: state.currentGroupId,
-            applicant: booking.applicant,
-            purpose: booking.purpose || '',
-            date: booking.date,
-            start: booking.start,
-            end: booking.end,
-            checkInAt: booking.checkInAt || null,
-            checkOutAt: booking.checkOutAt || null,
-            cancelledAt: null,
-            scans: [],
-            createdAt: booking.createdAt || new Date().toISOString()
-          });
-          changed = true;
-        }
+        bookings.forEach((booking) => nextBookings.push(bookingFromServer(booking)));
       }
-      if (changed) {
-        saveState();
-        renderView();
-      }
+      const sameInstruments = JSON.stringify(state.instruments) === JSON.stringify(instruments);
+      const sameBookings = JSON.stringify(state.bookings) === JSON.stringify(nextBookings);
+      if (sameInstruments && sameBookings) return;
+      state.instruments = instruments;
+      state.bookings = nextBookings;
+      saveState();
+      if (state.currentView !== 'admin' && !modalRoot.innerHTML) renderView();
     } catch {
-      // 预约后台不可用时，前端仍按本地演示数据工作。
+      // 预约后台不可用时保持当前已同步的数据，不再回退到页面里的演示设备。
     }
   }
 
-  renderView();
-  // 刷新后若停留在管理后台，补拉一次后台数据（登录态保存在 localStorage）。
-  if (state.currentView === 'admin' && isAdminLoggedIn()) loadAdminData();
+  if (userSession?.token && userSession.user) {
+    enterApp(userSession.user, userSession.token);
+    fetch('/api/users/me', { headers: { Authorization: `Bearer ${userSession.token}` } })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('expired');
+        const payload = await response.json();
+        if (!payload?.user) throw new Error('expired');
+        enterApp(payload.user, userSession.token);
+      })
+      .catch(() => {
+        saveUserSession(null);
+        saveAdminSession(null);
+        showAuthGate('login');
+      });
+  } else {
+    showAuthGate('login');
+  }
   syncBookingsFromServer();
   // 定期拉取扫码回写的上机 / 下机状态，让打开的页面能看到反馈。
   setInterval(syncBookingsFromServer, 15000);

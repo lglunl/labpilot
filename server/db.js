@@ -11,8 +11,10 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   return `${salt}:${hash}`;
 }
 
+const NO_PASSWORD = 'none';
+
 function verifyPassword(password, stored) {
-  if (!stored || !stored.includes(':')) return false;
+  if (!stored || stored === NO_PASSWORD || !stored.includes(':')) return false;
   const [salt, hash] = stored.split(':');
   const candidate = crypto.scryptSync(String(password), salt, 32).toString('hex');
   const a = Buffer.from(hash, 'hex');
@@ -67,6 +69,13 @@ export function openDatabase() {
       category TEXT,
       utilization INTEGER DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS scan_visits (
+      id TEXT PRIMARY KEY,
+      instrument_id TEXT NOT NULL,
+      visited_at TEXT NOT NULL,
+      redirected INTEGER NOT NULL DEFAULT 0,
+      public_url TEXT
+    );
     CREATE TABLE IF NOT EXISTS bookings (
       id TEXT PRIMARY KEY,
       instrument_id TEXT NOT NULL,
@@ -83,9 +92,15 @@ export function openDatabase() {
     );
   `);
   ensureColumn(db, 'users', 'is_admin', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'instruments', 'public_url', 'TEXT');
+  ensureColumn(db, 'instruments', 'presence_at', 'TEXT');
   ensureColumn(db, 'bookings', 'check_in_at', 'TEXT');
   ensureColumn(db, 'bookings', 'check_out_at', 'TEXT');
   ensureColumn(db, 'bookings', 'cancelled_at', 'TEXT');
+  ensureColumn(db, 'bookings', 'scan_email', 'TEXT');
+  ensureColumn(db, 'bookings', 'folder_path', 'TEXT');
+  ensureColumn(db, 'bookings', 'send_status', 'TEXT');
+  ensureColumn(db, 'bookings', 'send_error', 'TEXT');
   seed(db);
   return db;
 }
@@ -175,7 +190,28 @@ function publicInstrument(row) {
     manager: row.manager || '',
     category: row.category || '',
     utilization: row.utilization || 0,
+    publicUrl: row.public_url || '',
+    presenceAt: row.presence_at || null,
+    lastScanAt: row.last_scan_at || null,
   };
+}
+
+function normalizePublicUrl(value) {
+  const text = String(value || '').trim().replace(/\/+$/, '');
+  if (!/^https?:\/\/[^\s]+$/i.test(text) || text.length > 300) return '';
+  try {
+    const url = new URL(text);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function scanRedirectUrl(publicUrl, instrumentId) {
+  const url = new URL(publicUrl);
+  url.searchParams.set('instrument', instrumentId);
+  return url.toString();
 }
 
 function publicBooking(row) {
@@ -193,11 +229,19 @@ function publicBooking(row) {
     checkOutAt: row.check_out_at || null,
     cancelledAt: row.cancelled_at || null,
     createdAt: row.created_at,
+    email: row.scan_email || '',
+    folderPath: row.folder_path || '',
+    sendStatus: row.send_status || '',
+    sendError: row.send_error || '',
   };
 }
 
 export function createApi(db) {
   const findUserByName = db.prepare('SELECT * FROM users WHERE name = ?');
+  const findUserById = db.prepare('SELECT * FROM users WHERE id = ?');
+  const insertUser = db.prepare(
+    'INSERT INTO users (id, name, email, password_hash, role, is_admin) VALUES (?, ?, ?, ?, ?, 0)',
+  );
   const insertBooking = db.prepare(
     `INSERT INTO bookings
       (id, instrument_id, applicant, purpose, date, start, end, status, created_at)
@@ -206,8 +250,20 @@ export function createApi(db) {
   const selectActive = db.prepare(
     `SELECT * FROM bookings
       WHERE instrument_id = ? AND applicant = ? AND date = ? AND status = 'active'
+        AND check_in_at IS NULL AND check_out_at IS NULL
         AND start <= ? AND end >= ?
       ORDER BY start LIMIT 1`,
+  );
+  const selectOpenOnInstrument = db.prepare(
+    `SELECT * FROM bookings
+      WHERE instrument_id = ? AND status = 'active'
+        AND check_in_at IS NOT NULL AND check_out_at IS NULL
+      ORDER BY check_in_at DESC LIMIT 1`,
+  );
+  const selectPendingSend = db.prepare(
+    `SELECT * FROM bookings
+      WHERE instrument_id = ? AND send_status = 'pending'
+      ORDER BY check_out_at DESC LIMIT 1`,
   );
   const selectByInstrument = db.prepare(
     `SELECT * FROM bookings WHERE instrument_id = ? AND status = 'active' ORDER BY date, start`,
@@ -225,8 +281,16 @@ export function createApi(db) {
   );
 
   // 仪器表查询
-  const selectInstruments = db.prepare('SELECT * FROM instruments ORDER BY id');
-  const selectInstrumentById = db.prepare('SELECT * FROM instruments WHERE id = ?');
+  const instrumentSelect = `
+    SELECT i.*,
+      (SELECT MAX(visited_at) FROM scan_visits v WHERE v.instrument_id = i.id) AS last_scan_at
+    FROM instruments i`;
+  const selectInstruments = db.prepare(`${instrumentSelect} ORDER BY i.id`);
+  const selectInstrumentById = db.prepare(`${instrumentSelect} WHERE i.id = ?`);
+  const markPresence = db.prepare('UPDATE instruments SET public_url = ?, presence_at = ? WHERE id = ?');
+  const insertScanVisit = db.prepare(
+    'INSERT INTO scan_visits (id, instrument_id, visited_at, redirected, public_url) VALUES (?, ?, ?, ?, ?)',
+  );
   const insertInstrument = db.prepare(
     `INSERT INTO instruments (id, code, name, model, location, status, manager, category, utilization)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -258,10 +322,35 @@ export function createApi(db) {
     authenticate(name, password) {
       const row = findUserByName.get(String(name || '').trim());
       if (!row) return { ok: false, reason: 'not_registered' };
-      if (password && !verifyPassword(password, row.password_hash)) {
+      const given = String(password || '');
+      if (row.password_hash === NO_PASSWORD) {
+        if (given) return { ok: false, reason: 'no_password' };
+        return { ok: true, user: publicUser(row) };
+      }
+      if (!given || !verifyPassword(given, row.password_hash)) {
         return { ok: false, reason: 'bad_password' };
       }
       return { ok: true, user: publicUser(row) };
+    },
+
+    userById(id) {
+      return publicUser(findUserById.get(id));
+    },
+
+    registerUser({ name, password, email }) {
+      const cleanName = String(name || '').trim();
+      const cleanEmail = String(email || '').trim();
+      const cleanPassword = String(password || '');
+      if (!cleanName || cleanName.length > 40) return { ok: false, reason: 'bad_name' };
+      if (cleanPassword && (cleanPassword.length < 6 || cleanPassword.length > 72)) {
+        return { ok: false, reason: 'bad_password' };
+      }
+      if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) return { ok: false, reason: 'bad_email' };
+      if (findUserByName.get(cleanName)) return { ok: false, reason: 'name_taken' };
+      const id = `user_${crypto.randomBytes(6).toString('hex')}`;
+      const storedPassword = cleanPassword ? hashPassword(cleanPassword) : NO_PASSWORD;
+      insertUser.run(id, cleanName, cleanEmail, storedPassword, '实验室成员');
+      return { ok: true, user: publicUser(findUserById.get(id)) };
     },
 
     // 管理后台登录：必须是 is_admin 用户。
@@ -282,6 +371,33 @@ export function createApi(db) {
 
     instrumentById(id) {
       return publicInstrument(selectInstrumentById.get(id));
+    },
+
+    // 扫码 agent 上报当前公网地址。返回更新后的仪器。
+    recordPresence(id, publicUrl) {
+      const existing = selectInstrumentById.get(id);
+      if (!existing) return { ok: false, reason: 'not_found' };
+      const url = normalizePublicUrl(publicUrl);
+      if (!url) return { ok: false, reason: 'bad_url' };
+      const at = new Date().toISOString();
+      markPresence.run(url, at, id);
+      return { ok: true, instrument: publicInstrument(selectInstrumentById.get(id)) };
+    },
+
+    // 手机打开二维码：记一条扫码访问，有登记地址则给出跳转目标。
+    openScan(id) {
+      const existing = selectInstrumentById.get(id);
+      if (!existing) return { ok: false, reason: 'not_found' };
+      const instrument = publicInstrument(existing);
+      const redirectUrl = instrument.publicUrl ? scanRedirectUrl(instrument.publicUrl, instrument.id) : '';
+      insertScanVisit.run(
+        `SV-${crypto.randomBytes(6).toString('hex')}`,
+        instrument.id,
+        new Date().toISOString(),
+        redirectUrl ? 1 : 0,
+        instrument.publicUrl || null,
+      );
+      return { ok: true, instrument: publicInstrument(selectInstrumentById.get(id)), redirectUrl };
     },
 
     createInstrument({ id, code, name, model, location, status, manager, category, utilization }) {
@@ -342,6 +458,42 @@ export function createApi(db) {
     activeBooking({ instrumentId, applicant, date, time }) {
       const row = selectActive.get(instrumentId, applicant, date, time, time);
       return publicBooking(row);
+    },
+
+    openCheckIn(instrumentId) {
+      return publicBooking(selectOpenOnInstrument.get(instrumentId));
+    },
+
+    desk(instrumentId) {
+      if (!selectInstrumentById.get(instrumentId)) return { ok: false, reason: 'not_found' };
+      const open = selectOpenOnInstrument.get(instrumentId);
+      if (open) return { ok: true, phase: 'checked-in', booking: publicBooking(open) };
+      const pending = selectPendingSend.get(instrumentId);
+      if (pending) return { ok: true, phase: 'need-send', booking: publicBooking(pending) };
+      return { ok: true, phase: 'idle', booking: null };
+    },
+
+    setScanMail(id, email) {
+      const row = selectById.get(id);
+      if (!row) return { ok: false, reason: 'not_found' };
+      const status = String(email || '').trim() ? 'pending' : 'skipped';
+      db.prepare('UPDATE bookings SET scan_email = ?, send_status = ?, send_error = NULL WHERE id = ?')
+        .run(String(email || '').trim(), status, id);
+      return { ok: true, booking: publicBooking(selectById.get(id)) };
+    },
+
+    reportDesk(instrumentId, { bookingId, folderPath, sendStatus, sendError }) {
+      const row = selectById.get(String(bookingId || ''));
+      if (!row || row.instrument_id !== instrumentId) return { ok: false, reason: 'not_found' };
+      if (folderPath && !row.folder_path) {
+        db.prepare('UPDATE bookings SET folder_path = ? WHERE id = ?').run(String(folderPath).slice(0, 500), row.id);
+      }
+      const status = String(sendStatus || '');
+      if (status === 'sent' || status === 'failed' || status === 'skipped') {
+        db.prepare('UPDATE bookings SET send_status = ?, send_error = ? WHERE id = ?')
+          .run(status, String(sendError || '').slice(0, 300), row.id);
+      }
+      return { ok: true, booking: publicBooking(selectById.get(row.id)) };
     },
 
     bookingsForInstrument(instrumentId) {

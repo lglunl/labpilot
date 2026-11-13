@@ -6,8 +6,9 @@
 ┌─────────────────────┐         ┌──────────────────────┐
 │  预约服务器（labpilot） │  ◀───   │  设备电脑（扫码 agent）×N  │
 │  跑在你的一台机器上      │  HTTPS │  每台装在一台仪器电脑上       │
-│  - 预约/台账/看板界面    │        │  - 扫码登录 / 上机 / 下机     │
-│  - sqlite 数据库        │        │  - 调预约服务器的接口          │
+│  - 预约/台账/看板界面    │        │  - 轮询上机状态            │
+│  - sqlite 数据库        │        │  - 上机后建立实验文件夹      │
+│  - 扫码后的登录/上机/下机 │        │  - 下机后发送数据           │
 │  - HTTP 接口            │        └──────────────────────┘
 └─────────────────────┘
         ▲
@@ -30,24 +31,57 @@ cd D:\cursor_home\labpilot
 node --env-file-if-exists=.env server/index.js
 ```
 
-`.env` 里关键配置：
+配置文件是 **`D:\cursor_home\labpilot\.env`**（不要提交到 git）。关键项：
 
 ```
 LAB_API_TOKEN=你的密钥          # 与所有设备电脑一致
 LLM_API_KEY=sk-xxx              # DeepSeek key（摘要功能用）
+PUBLIC_BASE_URL=https://xxx.trycloudflare.com
 ```
 
 ### 2. 开放公网（当前用 quick tunnel）
 
+另开一个窗口，不要关掉：
+
 ```powershell
+cd D:\cursor_home\labpilot
 .workbuddy\cloudflared.exe tunnel --url http://127.0.0.1:8080 --no-autoupdate --protocol http2
 ```
 
-运行后会输出一个 `https://xxx.trycloudflare.com` 网址，这就是预约服务的公网地址。
+窗口里会出现一行 `https://xxx.trycloudflare.com`，这就是预约服务的公网地址。
 
-> ⚠️ quick tunnel 网址每次重启都会变。改为固定网址的方案见 `TODO.md`。
+隧道已经在跑、窗口找不到时，用本机指标读当前地址（cloudflared 默认监听 `127.0.0.1:20241`）：
 
-### 3. 查看设备（仪器）ID
+```powershell
+(Invoke-WebRequest http://127.0.0.1:20241/metrics -UseBasicParsing).Content |
+  Select-String 'userHostname="https://[^"]+"'
+```
+
+> quick tunnel 每次重启都会换一个新地址。地址一变，下面第 3 步要重做，已经打印的二维码也要重新下载。固定网址还没做。
+
+### 3. 把公网地址写进 `.env`（后续测试按这个做）
+
+打印二维码用的是 `.env` 里的 `PUBLIC_BASE_URL`。手机扫码后停留在预约系统，完成登录、上机和下机，不再跳到设备电脑。
+
+1. 打开 `D:\cursor_home\labpilot\.env`。
+2. 写成当前隧道地址，末尾不要加 `/`：
+
+```
+PUBLIC_BASE_URL=https://xxx.trycloudflare.com
+```
+
+3. 停掉正在听 `8080` 的 node，再用第 1 步的命令启动。只改文件不重启，进程仍用旧地址。
+4. 设备电脑 `config.json` 的 `booking_api_base` 填同一个地址（同样不要末尾 `/`）。
+
+自测：
+
+```powershell
+curl.exe https://xxx.trycloudflare.com/api/health
+```
+
+返回 200 即隧道和本机服务都通。然后用管理员登录，在「设备管理」里点某台仪器的「二维码」。下载的 SVG 编码的是 `{PUBLIC_BASE_URL}/s/{仪器ID}`，例如 `https://xxx.trycloudflare.com/s/inst_fc`。没配 `PUBLIC_BASE_URL` 时，从本机后台下载会返回 400。
+
+### 4. 查看设备（仪器）ID
 
 两种方式：
 
@@ -64,7 +98,7 @@ curl.exe -H "Authorization: Bearer 你的密钥" https://xxx.trycloudflare.com/a
 
 ## 二、设备电脑（扫码 agent）
 
-每台设备电脑一份代码，改两个地方：
+每台设备电脑一份代码，改两个地方。更细的步骤见扫码 agent 仓库根目录的 `DEPLOYMENT.md`。
 
 ### 1. `config.json`
 
@@ -77,7 +111,7 @@ curl.exe -H "Authorization: Bearer 你的密钥" https://xxx.trycloudflare.com/a
 }
 ```
 
-- `booking_api_base`：预约服务器的公网网址。
+- `booking_api_base`：和预约服务器 `.env` 里的 `PUBLIC_BASE_URL` 相同。
 - `instrument_id`：这台设备对应哪台仪器（就是上面查到的仪器 `id`）。
 - `require_booking`：是否强制「有预约才能上机」，一般保持 `true`。
 
@@ -95,10 +129,9 @@ python -m labcheckin
 
 ### 3. 启动
 
-```powershell
-cd 扫码agent目录
-python -m labcheckin
-```
+新设备电脑不用安装 Python。把扫码程序文件夹拷过去，配好 `config.json` 和密钥后，双击 `start.cmd`。窗口不要关。
+
+启动后这台电脑不会再给自己申请公网地址。它只按 `instrument_id` 轮询预约系统：有人上机就建立文件夹，有人下机并填写邮箱就发送数据。预约服务器的隧道重启才要改 `PUBLIC_BASE_URL` 并重新下载二维码。
 
 ---
 
@@ -112,11 +145,11 @@ python -m labcheckin
 
 ## 四、数据流
 
-| 操作 | 设备电脑（扫码 agent） | 预约服务器 |
+| 操作 | 谁发起 | 预约服务器 |
 |---|---|---|
-| 登录 | `POST /api/users/verify` | 校验是否注册用户 |
-| 上机前 | `GET /api/bookings/active` | 查该仪器 + 该用户当前时段有效预约 |
-| 上机后 | `POST /api/bookings/:id/scan` (check-in) | 回写上机时间 |
-| 下机后 | `POST /api/bookings/:id/scan` (check-out) | 回写下机时间 |
+| 扫码登录 | 手机打开 `{PUBLIC_BASE_URL}/s/{仪器ID}` | 校验姓名，必要时校验密码 |
+| 上机 / 下机 | 手机停留在预约系统 | 记下上机、下机时间；填了邮箱则标记待发送 |
+| 建立文件夹 | 设备电脑 `GET /api/instruments/:id/desk` | 返回当前是空闲、已上机，还是待发送 |
+| 回报结果 | 设备电脑 `POST` 同一路径 | 记下文件夹路径、已发送或失败原因 |
 
-所有接口都需要 `Authorization: Bearer <密钥>`，不带或错误返回 401。
+设备电脑的 desk 接口需要 `Authorization: Bearer <密钥>`。手机扫码页面用登录会话，不使用这把密钥。
