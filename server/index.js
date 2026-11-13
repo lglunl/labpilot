@@ -219,12 +219,33 @@ function readJsonBody(req, limit = 4 * 1024 * 1024) {
   });
 }
 
+// 管理后台会话：内存态，重启后需重新登录。token -> { userId, name, at }
+const adminSessions = new Map();
+const ADMIN_TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
+
+function adminTokenFromHeader(header = '') {
+  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!token || !adminSessions.has(token)) return false;
+  const session = adminSessions.get(token);
+  if (Date.now() - session.at > ADMIN_TOKEN_TTL_MS) {
+    adminSessions.delete(token);
+    return false;
+  }
+  return true;
+}
+
+function authorizeAdmin(req) {
+  return adminTokenFromHeader(req.headers.authorization || '');
+}
+
 // 数据接口鉴权：设置了 LAB_API_TOKEN 时，请求需带 Authorization: Bearer <token>。
 // 未设置 token 时放行，方便本机联调。
+// 同时接受管理后台会话 token，方便登录后的前端页面读取预约/仪器数据。
 function authorize(req) {
-  if (!CONFIG.apiToken) return true;
   const header = req.headers.authorization || '';
-  return header === `Bearer ${CONFIG.apiToken}`;
+  if (CONFIG.apiToken && header === `Bearer ${CONFIG.apiToken}`) return true;
+  if (adminTokenFromHeader(header)) return true;
+  return !CONFIG.apiToken;
 }
 
 function todayKey() {
@@ -264,12 +285,95 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // ---------- 管理后台接口（admin 会话鉴权，独立于 LAB_API_TOKEN） ----------
+  if (pathname.startsWith('/api/admin')) {
+    if (pathname === '/api/admin/login' && req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.adminLogin(body?.name, body?.password);
+      if (!result.ok) {
+        const message = result.reason === 'bad_password' ? '密码不正确'
+          : result.reason === 'not_admin' ? '该账号不是管理员'
+          : '该账号不存在';
+        return sendJson(res, 200, { ok: false, reason: result.reason, message });
+      }
+      const token = crypto.randomBytes(24).toString('hex');
+      adminSessions.set(token, { userId: result.user.id, name: result.user.name, at: Date.now() });
+      log('info', '管理后台登录', `user=${result.user.name}`);
+      return sendJson(res, 200, { ok: true, token, user: result.user });
+    }
+
+    if (!authorizeAdmin(req)) return sendJson(res, 401, { error: '未授权或登录已失效' });
+
+    if (pathname === '/api/admin/instruments' && req.method === 'GET') {
+      return sendJson(res, 200, { instruments: dbApi.listInstruments() });
+    }
+    if (pathname === '/api/admin/instruments' && req.method === 'POST') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.createInstrument(body || {});
+      if (!result.ok) {
+        const message = result.reason === 'duplicate_id' ? '设备 ID 已存在' : '设备名与 ID 不能为空';
+        return sendJson(res, 400, { ok: false, reason: result.reason, message });
+      }
+      return sendJson(res, 201, { ok: true, instrument: result.instrument });
+    }
+    const instrumentEditMatch = pathname.match(/^\/api\/admin\/instruments\/([^/]+)$/);
+    if (instrumentEditMatch) {
+      const id = decodeURIComponent(instrumentEditMatch[1]);
+      if (req.method === 'PUT') {
+        let body;
+        try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+        const result = dbApi.updateInstrument(id, body || {});
+        if (!result.ok) return sendJson(res, 404, { ok: false, reason: result.reason, message: '设备不存在' });
+        return sendJson(res, 200, { ok: true, instrument: result.instrument });
+      }
+      if (req.method === 'DELETE') {
+        const result = dbApi.deleteInstrument(id);
+        if (!result.ok) {
+          const message = result.reason === 'has_bookings' ? '该设备已有预约记录，不能删除' : '设备不存在';
+          return sendJson(res, 400, { ok: false, reason: result.reason, message });
+        }
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+    if (pathname === '/api/admin/bookings' && req.method === 'GET') {
+      return sendJson(res, 200, { bookings: dbApi.listBookings() });
+    }
+    const adminCancelMatch = pathname.match(/^\/api\/admin\/bookings\/([^/]+)\/cancel$/);
+    if (adminCancelMatch && req.method === 'POST') {
+      const result = dbApi.cancelBooking(decodeURIComponent(adminCancelMatch[1]));
+      if (!result.ok) {
+        const message = result.reason === 'already_checked_in' ? '已上机的预约不能取消' : '预约不存在';
+        return sendJson(res, 400, { ok: false, reason: result.reason, message });
+      }
+      return sendJson(res, 200, { ok: true, booking: result.booking });
+    }
+    const adminBookingMatch = pathname.match(/^\/api\/admin\/bookings\/([^/]+)$/);
+    if (adminBookingMatch && req.method === 'PUT') {
+      let body;
+      try { body = await readJsonBody(req); } catch (error) { return sendJson(res, 400, { error: error.message }); }
+      const result = dbApi.updateBooking(decodeURIComponent(adminBookingMatch[1]), body || {});
+      if (!result.ok) {
+        const message = result.reason === 'missing_fields' ? '日期和时段不能为空'
+          : result.reason === 'already_checked_in' ? '已上机的预约不能改为已取消'
+          : '预约不存在';
+        return sendJson(res, 400, { ok: false, reason: result.reason, message });
+      }
+      return sendJson(res, 200, { ok: true, booking: result.booking });
+    }
+    if (pathname === '/api/admin/users' && req.method === 'GET') {
+      return sendJson(res, 200, { users: dbApi.listUsers() });
+    }
+    return sendJson(res, 404, { error: '接口不存在' });
+  }
+
   // ---------- 预约数据接口（供扫码 agent 与本机前端调用） ----------
   if (pathname.startsWith('/api/users') || pathname.startsWith('/api/bookings') || pathname === '/api/instruments') {
     if (!authorize(req)) return sendJson(res, 401, { error: '未授权' });
 
     if (pathname === '/api/instruments' && req.method === 'GET') {
-      return sendJson(res, 200, { instruments: dbApi.instruments });
+      return sendJson(res, 200, { instruments: dbApi.listInstruments() });
     }
 
     if (pathname === '/api/users/verify' && req.method === 'POST') {

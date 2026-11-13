@@ -2,6 +2,7 @@
   'use strict';
 
   const STORAGE_KEY = 'labpilot_demo_state_v1';
+  const ADMIN_SESSION_KEY = 'labpilot_admin_session_v1';
   const appShell = document.getElementById('app-shell');
   const viewRoot = document.getElementById('view-root');
   const contextPanel = document.getElementById('context-panel');
@@ -432,6 +433,62 @@
     }
   }
 
+  /* ---------- 管理后台会话 ---------- */
+  let adminSession = loadAdminSession();
+
+  function loadAdminSession() {
+    try {
+      const raw = localStorage.getItem(ADMIN_SESSION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && parsed.token ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveAdminSession(session) {
+    adminSession = session;
+    try {
+      if (session) localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(session));
+      else localStorage.removeItem(ADMIN_SESSION_KEY);
+    } catch {
+      // Storage unavailable.
+    }
+  }
+
+  function isAdminLoggedIn() {
+    return Boolean(adminSession && adminSession.token);
+  }
+
+  function authHeaders(extra = {}) {
+    const headers = { ...extra };
+    if (adminSession && adminSession.token) headers.Authorization = `Bearer ${adminSession.token}`;
+    return headers;
+  }
+
+  // 管理后台专用请求：401 时清除会话并提示重新登录。
+  async function adminFetch(path, options = {}) {
+    const headers = authHeaders(options.headers || {});
+    const init = { ...options, headers };
+    if (init.body && typeof init.body !== 'string') {
+      headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(init.body);
+    }
+    const response = await fetch(path, init);
+    if (response.status === 401) {
+      saveAdminSession(null);
+      toast('登录已失效，请重新登录管理后台。', 'error');
+      return null;
+    }
+    return response;
+  }
+
+  // 普通接口也带上管理员会话，这样登录后台后，预约/台账视图能正常读写。
+  function apiHeaders(extra = {}) {
+    return authHeaders(extra);
+  }
+
   function getGroup(groupId = state.currentGroupId) {
     return state.groups.find((group) => group.id === groupId) || state.groups[0];
   }
@@ -592,6 +649,7 @@
     else if (state.currentView === 'booking') renderBooking();
     else if (state.currentView === 'ledger') renderLedger();
     else if (state.currentView === 'agents') renderAgents();
+    else if (state.currentView === 'admin') renderAdmin();
     else renderDashboard();
 
     renderContext();
@@ -2028,6 +2086,455 @@
     `, { label: 'Agent 权限说明' });
   }
 
+  /* ---------- 管理后台 ---------- */
+  let adminTab = 'devices';
+  let adminDevices = [];
+  let adminBookings = [];
+  let adminUsers = [];
+
+  const ADMIN_TAB_LABEL = { devices: '设备管理', bookings: '预约管理', users: '用户管理' };
+
+  async function loadAdminData() {
+    if (!isAdminLoggedIn()) return;
+    const [instRes, bookingRes, userRes] = await Promise.all([
+      adminFetch('/api/admin/instruments'),
+      adminFetch('/api/admin/bookings'),
+      adminFetch('/api/admin/users')
+    ]);
+    if (instRes && instRes.ok) {
+      const { instruments = [] } = await instRes.json().catch(() => ({}));
+      adminDevices = instruments;
+    }
+    if (bookingRes && bookingRes.ok) {
+      const { bookings = [] } = await bookingRes.json().catch(() => ({}));
+      adminBookings = bookings;
+    }
+    if (userRes && userRes.ok) {
+      const { users = [] } = await userRes.json().catch(() => ({}));
+      adminUsers = users;
+    }
+    renderView();
+  }
+
+  function adminBookingStatus(booking) {
+    if (booking.status === 'cancelled') return { label: '已取消', cls: 'overdue' };
+    if (booking.checkInAt && booking.checkOutAt) return { label: '已闭环', cls: 'closed' };
+    if (booking.checkInAt) return { label: '使用中', cls: 'in-use' };
+    return { label: '待上机', cls: 'scheduled' };
+  }
+
+  function renderAdmin() {
+    viewRoot.innerHTML = `
+      <section class="view-shell">
+        <header class="view-header">
+          <div class="view-header-copy">
+            <h1>管理后台 <span class="agent-type">管理员</span></h1>
+            <p>${escapeHtml(adminSession?.user?.name || 'admin')} · 设备、预约与注册用户管理</p>
+          </div>
+          <div class="view-header-actions">
+            <button class="button" type="button" data-action="admin-logout">${icon('logout')} 退出登录</button>
+          </div>
+        </header>
+        <div class="page-scroll">
+          <div class="page-content">
+            <div class="admin-tabs">
+              ${Object.entries(ADMIN_TAB_LABEL).map(([key, label]) => `
+                <button class="admin-tab ${adminTab === key ? 'is-active' : ''}" type="button" data-action="admin-tab" data-tab="${key}">${escapeHtml(label)}</button>
+              `).join('')}
+            </div>
+            <div class="admin-panel">
+              ${adminTab === 'devices' ? renderAdminDevices() : adminTab === 'bookings' ? renderAdminBookings() : renderAdminUsers()}
+            </div>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderAdminDevices() {
+    return `
+      <div class="admin-toolbar">
+        <div>
+          <h2>仪器设备</h2>
+          <p>共 ${adminDevices.length} 台 · 新增、编辑、删除或调整设备状态</p>
+        </div>
+        <button class="button button-primary" type="button" data-action="admin-device-new">${icon('plus')} 新增设备</button>
+      </div>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>设备</th><th>编号</th><th>位置</th><th>状态</th><th>负责人</th><th>类别</th><th>利用率</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            ${adminDevices.map((d) => `
+              <tr>
+                <td><div class="table-main"><strong>${escapeHtml(d.name)}</strong><small>${escapeHtml(d.model || '—')}</small></div></td>
+                <td>${escapeHtml(d.code || '—')}</td>
+                <td>${escapeHtml(d.location || '—')}</td>
+                <td><span class="status-badge ${d.status === 'available' ? 'closed' : d.status === 'in-use' ? 'in-use' : 'overdue'}">${escapeHtml(instrumentStatusLabel(d.status))}</span></td>
+                <td>${escapeHtml(d.manager || '—')}</td>
+                <td>${escapeHtml(d.category || '—')}</td>
+                <td>${d.utilization != null ? `${escapeHtml(String(d.utilization))}%` : '—'}</td>
+                <td>
+                  <div class="table-actions">
+                    <button class="button button-sm button-soft" type="button" data-action="admin-device-edit" data-device-id="${escapeHtml(d.id)}">编辑</button>
+                    <button class="button button-sm button-ghost" type="button" data-action="admin-device-delete" data-device-id="${escapeHtml(d.id)}">删除</button>
+                  </div>
+                </td>
+              </tr>
+            `).join('') || `<tr><td colspan="8"><div class="empty-state" style="padding:28px">暂无设备</div></td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderAdminBookings() {
+    const instrumentName = (id) => (adminDevices.find((d) => d.id === id)?.name || id);
+    return `
+      <div class="admin-toolbar">
+        <div>
+          <h2>预约记录</h2>
+          <p>共 ${adminBookings.length} 条 · 含历史、取消与进行中</p>
+        </div>
+      </div>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>预约号</th><th>设备</th><th>申请人</th><th>日期</th><th>时段</th><th>状态</th><th>上机 / 下机</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            ${adminBookings.map((b) => {
+              const st = adminBookingStatus(b);
+              return `
+                <tr>
+                  <td><strong>${escapeHtml(b.id)}</strong></td>
+                  <td>${escapeHtml(instrumentName(b.instrumentId))}</td>
+                  <td>${escapeHtml(b.applicant)}</td>
+                  <td>${escapeHtml(b.date)}</td>
+                  <td>${escapeHtml(b.start)}–${escapeHtml(b.end)}</td>
+                  <td><span class="status-badge ${st.cls}">${st.label}</span></td>
+                  <td>${b.checkInAt ? escapeHtml(formatTimeOnly(b.checkInAt)) : '—'} / ${b.checkOutAt ? escapeHtml(formatTimeOnly(b.checkOutAt)) : '—'}</td>
+                  <td>
+                    <div class="table-actions">
+                      <button class="button button-sm button-soft" type="button" data-action="admin-booking-edit" data-booking-id="${escapeHtml(b.id)}">编辑</button>
+                      ${b.status === 'active' && !b.checkInAt ? `<button class="button button-sm button-ghost" type="button" data-action="admin-booking-cancel" data-booking-id="${escapeHtml(b.id)}">取消</button>` : ''}
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join('') || `<tr><td colspan="8"><div class="empty-state" style="padding:28px">暂无预约</div></td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderAdminUsers() {
+    return `
+      <div class="admin-toolbar">
+        <div>
+          <h2>注册用户</h2>
+          <p>共 ${adminUsers.length} 人 · 用于扫码登录与预约申请人</p>
+        </div>
+      </div>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>姓名</th><th>邮箱</th><th>角色</th><th>管理权限</th></tr>
+          </thead>
+          <tbody>
+            ${adminUsers.map((u) => `
+              <tr>
+                <td><div class="table-main"><strong>${escapeHtml(u.name)}</strong><small>${escapeHtml(u.id)}</small></div></td>
+                <td>${escapeHtml(u.email || '—')}</td>
+                <td>${escapeHtml(u.role || '—')}</td>
+                <td>${u.isAdmin ? '<span class="status-badge closed">管理员</span>' : '—'}</td>
+              </tr>
+            `).join('') || `<tr><td colspan="4"><div class="empty-state" style="padding:28px">暂无用户</div></td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function openAdminLoginModal() {
+    openModal(`
+      <div class="modal-card">
+        ${modalHeader('管理后台登录', '需要平台管理员账号（默认 admin / admin123）。')}
+        <form id="admin-login-form">
+          <div class="modal-body">
+            <div class="form-field">
+              <label for="admin-login-name">管理员账号 <span>*</span></label>
+              <input id="admin-login-name" name="name" type="text" autocomplete="username" value="admin" required>
+            </div>
+            <div class="form-field">
+              <label for="admin-login-password">密码 <span>*</span></label>
+              <input id="admin-login-password" name="password" type="password" autocomplete="current-password" required>
+            </div>
+            <div class="form-error" id="admin-login-error"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="button" type="button" data-action="close-modal">取消</button>
+            <button class="button button-primary" type="submit">${icon('settings')} 登录</button>
+          </div>
+        </form>
+      </div>
+    `, { label: '管理后台登录' });
+    const input = $('#admin-login-password');
+    if (input) setTimeout(() => input.focus(), 30);
+  }
+
+  async function handleAdminLogin(form) {
+    const formData = new FormData(form);
+    const name = String(formData.get('name') || '').trim();
+    const password = String(formData.get('password') || '');
+    const error = $('#admin-login-error');
+    if (!name || !password) {
+      error.textContent = '请填写账号和密码。';
+      error.classList.add('is-visible');
+      return;
+    }
+    try {
+      const response = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, password })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        error.textContent = payload.message || '登录失败，请确认账号密码。';
+        error.classList.add('is-visible');
+        return;
+      }
+      saveAdminSession({ token: payload.token, user: payload.user });
+      closeModal();
+      state.currentView = 'admin';
+      saveState();
+      await loadAdminData();
+      toast(`已登录管理后台：${payload.user.name}`);
+    } catch {
+      error.textContent = '无法连接服务，请确认服务已启动。';
+      error.classList.add('is-visible');
+    }
+  }
+
+  function openAdminDeviceModal(id = '') {
+    const device = id ? adminDevices.find((d) => d.id === id) : null;
+    const d = device || { id: '', code: '', name: '', model: '', location: '', status: 'available', manager: '', category: '', utilization: 0 };
+    openModal(`
+      <div class="modal-card">
+        ${modalHeader(device ? '编辑设备' : '新增设备', device ? `修改「${escapeHtml(device.name)}」的信息与状态` : '新设备会立即出现在预约列表。')}
+        <form id="admin-device-form" data-device-id="${escapeHtml(d.id)}">
+          <div class="modal-body">
+            <div class="form-grid">
+              <div class="form-field full">
+                <label for="admin-device-name">设备名称 <span>*</span></label>
+                <input id="admin-device-name" name="name" type="text" value="${escapeHtml(d.name)}" required>
+              </div>
+              <div class="form-field">
+                <label for="admin-device-id">设备 ID <span>*</span></label>
+                <input id="admin-device-id" name="id" type="text" value="${escapeHtml(d.id)}" ${device ? 'readonly' : ''} placeholder="inst_xxx" required>
+              </div>
+              <div class="form-field">
+                <label for="admin-device-code">设备编号</label>
+                <input id="admin-device-code" name="code" type="text" value="${escapeHtml(d.code)}" placeholder="FC-01">
+              </div>
+              <div class="form-field">
+                <label for="admin-device-model">型号</label>
+                <input id="admin-device-model" name="model" type="text" value="${escapeHtml(d.model)}">
+              </div>
+              <div class="form-field">
+                <label for="admin-device-location">位置</label>
+                <input id="admin-device-location" name="location" type="text" value="${escapeHtml(d.location)}" placeholder="B2-107">
+              </div>
+              <div class="form-field">
+                <label for="admin-device-manager">负责人</label>
+                <input id="admin-device-manager" name="manager" type="text" value="${escapeHtml(d.manager)}">
+              </div>
+              <div class="form-field">
+                <label for="admin-device-status">状态</label>
+                <select id="admin-device-status" name="status">
+                  <option value="available" ${d.status === 'available' ? 'selected' : ''}>可预约</option>
+                  <option value="in-use" ${d.status === 'in-use' ? 'selected' : ''}>使用中</option>
+                  <option value="maintenance" ${d.status === 'maintenance' ? 'selected' : ''}>维护中</option>
+                </select>
+              </div>
+              <div class="form-field">
+                <label for="admin-device-category">类别</label>
+                <input id="admin-device-category" name="category" type="text" value="${escapeHtml(d.category)}">
+              </div>
+              <div class="form-field">
+                <label for="admin-device-utilization">利用率（%）</label>
+                <input id="admin-device-utilization" name="utilization" type="number" min="0" max="100" value="${escapeHtml(String(d.utilization ?? 0))}">
+              </div>
+            </div>
+            <div class="form-error" id="admin-device-error"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="button" type="button" data-action="close-modal">取消</button>
+            <button class="button button-primary" type="submit">${icon('check')} 保存</button>
+          </div>
+        </form>
+      </div>
+    `, { label: device ? '编辑设备' : '新增设备' });
+  }
+
+  async function handleAdminDeviceSave(form) {
+    const isEdit = Boolean(form.dataset.deviceId);
+    const formData = new FormData(form);
+    const payload = {
+      id: String(formData.get('id') || '').trim(),
+      code: String(formData.get('code') || '').trim(),
+      name: String(formData.get('name') || '').trim(),
+      model: String(formData.get('model') || '').trim(),
+      location: String(formData.get('location') || '').trim(),
+      status: String(formData.get('status') || 'available'),
+      manager: String(formData.get('manager') || '').trim(),
+      category: String(formData.get('category') || '').trim(),
+      utilization: Number(formData.get('utilization') || 0)
+    };
+    const error = $('#admin-device-error');
+    if (!payload.id || !payload.name) {
+      error.textContent = '设备 ID 与名称不能为空。';
+      error.classList.add('is-visible');
+      return;
+    }
+    const path = isEdit ? `/api/admin/instruments/${encodeURIComponent(payload.id)}` : '/api/admin/instruments';
+    const response = await adminFetch(path, { method: isEdit ? 'PUT' : 'POST', body: payload });
+    if (!response) return;
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) {
+      error.textContent = result.message || '保存失败，请重试。';
+      error.classList.add('is-visible');
+      return;
+    }
+    closeModal();
+    await loadAdminData();
+    toast(isEdit ? '设备已更新。' : '设备已新增。');
+  }
+
+  async function adminDeleteDevice(id) {
+    const device = adminDevices.find((d) => d.id === id);
+    if (!device) return;
+    if (!window.confirm(`确定删除设备「${device.name}」吗？该操作不可撤销。`)) return;
+    const response = await adminFetch(`/api/admin/instruments/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!response) return;
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) {
+      toast(result.message || '删除失败。', 'error');
+      return;
+    }
+    await loadAdminData();
+    toast('设备已删除。');
+  }
+
+  function openAdminBookingModal(id) {
+    const booking = adminBookings.find((b) => b.id === id);
+    if (!booking) return;
+    const statusOptions = [['active', '有效'], ['cancelled', '已取消']];
+    openModal(`
+      <div class="modal-card">
+        ${modalHeader('编辑预约', `${escapeHtml(booking.id)} · ${escapeHtml(booking.applicant)}`)}
+        <form id="admin-booking-form" data-booking-id="${escapeHtml(id)}">
+          <div class="modal-body">
+            <div class="form-grid">
+              <div class="form-field full">
+                <label for="admin-booking-instrument">设备</label>
+                <select id="admin-booking-instrument" name="instrumentId">
+                  ${adminDevices.map((d) => `<option value="${escapeHtml(d.id)}" ${d.id === booking.instrumentId ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('')}
+                </select>
+              </div>
+              <div class="form-field">
+                <label for="admin-booking-applicant">申请人</label>
+                <input id="admin-booking-applicant" name="applicant" type="text" value="${escapeHtml(booking.applicant)}">
+              </div>
+              <div class="form-field">
+                <label for="admin-booking-date">日期</label>
+                <input id="admin-booking-date" name="date" type="date" value="${escapeHtml(booking.date)}">
+              </div>
+              <div class="form-field">
+                <label for="admin-booking-start">开始</label>
+                <input id="admin-booking-start" name="start" type="time" value="${escapeHtml(booking.start)}">
+              </div>
+              <div class="form-field">
+                <label for="admin-booking-end">结束</label>
+                <input id="admin-booking-end" name="end" type="time" value="${escapeHtml(booking.end)}">
+              </div>
+              <div class="form-field">
+                <label for="admin-booking-status">状态</label>
+                <select id="admin-booking-status" name="status">
+                  ${statusOptions.map(([v, l]) => `<option value="${v}" ${booking.status === v ? 'selected' : ''}>${l}</option>`).join('')}
+                </select>
+              </div>
+              <div class="form-field full">
+                <label for="admin-booking-purpose">使用目的</label>
+                <textarea id="admin-booking-purpose" name="purpose">${escapeHtml(booking.purpose || '')}</textarea>
+              </div>
+            </div>
+            <div class="form-error" id="admin-booking-error"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="button" type="button" data-action="close-modal">取消</button>
+            <button class="button button-primary" type="submit">${icon('check')} 保存</button>
+          </div>
+        </form>
+      </div>
+    `, { label: '编辑预约' });
+  }
+
+  async function handleAdminBookingSave(form) {
+    const id = form.dataset.bookingId;
+    const formData = new FormData(form);
+    const payload = {
+      instrumentId: String(formData.get('instrumentId') || ''),
+      applicant: String(formData.get('applicant') || '').trim(),
+      purpose: String(formData.get('purpose') || '').trim(),
+      date: String(formData.get('date') || ''),
+      start: String(formData.get('start') || ''),
+      end: String(formData.get('end') || ''),
+      status: String(formData.get('status') || 'active')
+    };
+    const error = $('#admin-booking-error');
+    if (!payload.date || !payload.start || !payload.end) {
+      error.textContent = '日期和时段不能为空。';
+      error.classList.add('is-visible');
+      return;
+    }
+    const response = await adminFetch(`/api/admin/bookings/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+    if (!response) return;
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) {
+      error.textContent = result.message || '保存失败，请重试。';
+      error.classList.add('is-visible');
+      return;
+    }
+    closeModal();
+    await loadAdminData();
+    toast('预约已更新。');
+  }
+
+  async function adminCancelBooking(id) {
+    const response = await adminFetch(`/api/admin/bookings/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+    if (!response) return;
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) {
+      toast(result.message || '取消失败。', 'error');
+      return;
+    }
+    await loadAdminData();
+    toast('预约已取消。');
+  }
+
+  function adminLogout() {
+    saveAdminSession(null);
+    state.currentView = 'chat';
+    saveState();
+    closeModal();
+    renderView();
+    toast('已退出管理后台。');
+  }
+
   function openUserMenu() {
     openModal(`
       <div class="modal-card">
@@ -2038,6 +2545,17 @@
             <div class="agent-profile-copy">
               <strong>${escapeHtml(state.currentUser.name)}</strong>
               <p>${escapeHtml(state.currentUser.role)} · 个人演示账号</p>
+            </div>
+          </div>
+          <div class="admin-entry" style="margin-bottom:16px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-soft)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+              <div>
+                <strong style="display:block">管理后台</strong>
+                <p style="margin:2px 0 0;color:var(--muted);font-size:12px">
+                  ${isAdminLoggedIn() ? `已登录：${escapeHtml(adminSession.user?.name || 'admin')}` : '管理设备、预约与注册用户，需管理员账号登录'}
+                </p>
+              </div>
+              <button class="button button-sm ${isAdminLoggedIn() ? 'button-soft' : 'button-primary'}" type="button" data-action="open-admin">${isAdminLoggedIn() ? '进入后台' : '登录'}</button>
             </div>
           </div>
           <div class="checkbox-list">
@@ -2073,9 +2591,16 @@
   }
 
   function setView(view) {
+    if (view === 'admin' && !isAdminLoggedIn()) {
+      openAdminLoginModal();
+      return;
+    }
     state.currentView = view;
     if (view === 'booking') {
       state.selectedDate = state.selectedDate || todayKey();
+    }
+    if (view === 'admin') {
+      loadAdminData();
     }
     saveState();
     closeModal();
@@ -2207,7 +2732,7 @@
     try {
       const response = await fetch('/api/bookings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ instrumentId, applicant, purpose, date, start, end })
       });
       const payload = await response.json().catch(() => ({}));
@@ -2412,7 +2937,7 @@
       try {
         const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}/scan`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ action: 'check-in', at: nowIso })
         });
         const payload = await response.json().catch(() => ({}));
@@ -2446,7 +2971,7 @@
       try {
         const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}/scan`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ action: 'check-out', at: nowIso })
         });
         const payload = await response.json().catch(() => ({}));
@@ -2480,7 +3005,7 @@
       return;
     }
     try {
-      const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}/cancel`, { method: 'POST' });
+      const response = await fetch(`/api/bookings/${encodeURIComponent(bookingId)}/cancel`, { method: 'POST', headers: apiHeaders() });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || !payload.ok) {
         toast(payload.message || '取消预约失败，请稍后再试。', 'error');
@@ -2827,6 +3352,39 @@
     if (action === 'project-settings') {
       toast('当前项目：先进材料实验室 / 微流控芯片组。权限与预算由生产后台配置。');
     }
+    if (action === 'open-admin') {
+      setView('admin');
+      return;
+    }
+    if (action === 'admin-logout') {
+      adminLogout();
+      return;
+    }
+    if (action === 'admin-tab') {
+      adminTab = actionTarget.dataset.tab || 'devices';
+      renderView();
+      return;
+    }
+    if (action === 'admin-device-new') {
+      openAdminDeviceModal();
+      return;
+    }
+    if (action === 'admin-device-edit') {
+      openAdminDeviceModal(actionTarget.dataset.deviceId);
+      return;
+    }
+    if (action === 'admin-device-delete') {
+      adminDeleteDevice(actionTarget.dataset.deviceId);
+      return;
+    }
+    if (action === 'admin-booking-edit') {
+      openAdminBookingModal(actionTarget.dataset.bookingId);
+      return;
+    }
+    if (action === 'admin-booking-cancel') {
+      adminCancelBooking(actionTarget.dataset.bookingId);
+      return;
+    }
   });
 
   document.addEventListener('submit', (event) => {
@@ -2838,6 +3396,9 @@
     else if (form.id === 'agent-form') handleAgentCreate(form);
     else if (form.id === 'group-form') handleGroupCreate(form);
     else if (form.id === 'scan-form') handleScanSubmit(form);
+    else if (form.id === 'admin-login-form') handleAdminLogin(form);
+    else if (form.id === 'admin-device-form') handleAdminDeviceSave(form);
+    else if (form.id === 'admin-booking-form') handleAdminBookingSave(form);
   });
 
   document.addEventListener('change', (event) => {
@@ -2902,7 +3463,7 @@
   // 启动时把后台（sqlite）里的预约合并进本地状态，保证扫码 agent 看到的预约和这里一致。
   async function syncBookingsFromServer() {
     try {
-      const response = await fetch('/api/instruments');
+      const response = await fetch('/api/instruments', { headers: apiHeaders() });
       if (!response.ok) return;
       const { instruments = [] } = await response.json();
       let changed = false;
@@ -2919,7 +3480,7 @@
         }
       }
       for (const instrument of instruments) {
-        const res = await fetch(`/api/bookings/instrument/${encodeURIComponent(instrument.id)}`);
+        const res = await fetch(`/api/bookings/instrument/${encodeURIComponent(instrument.id)}`, { headers: apiHeaders() });
         if (!res.ok) continue;
         const { bookings = [] } = await res.json();
         for (const booking of bookings) {
@@ -2964,6 +3525,8 @@
   }
 
   renderView();
+  // 刷新后若停留在管理后台，补拉一次后台数据（登录态保存在 localStorage）。
+  if (state.currentView === 'admin' && isAdminLoggedIn()) loadAdminData();
   syncBookingsFromServer();
   // 定期拉取扫码回写的上机 / 下机状态，让打开的页面能看到反馈。
   setInterval(syncBookingsFromServer, 15000);
