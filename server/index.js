@@ -746,8 +746,12 @@ const server = http.createServer(async (req, res) => {
       }
       const result = dbApi.createBooking({ instrumentId, applicant, purpose, date, start, end });
       if (!result.ok) {
-        const message = result.reason === 'applicant_not_registered' ? '申请人未注册' : '未知仪器';
-        return sendJson(res, 400, { ok: false, reason: result.reason, message });
+        const message = result.reason === 'applicant_not_registered' ? '申请人未注册'
+          : result.reason === 'conflict' ? `该时段与 ${result.conflict?.id}（${result.conflict?.start}–${result.conflict?.end}）冲突，请调整时间。`
+          : result.reason === 'bad_time' ? '时段格式应为 HH:MM。'
+          : result.reason === 'bad_time_range' ? '结束时间必须晚于开始时间。'
+          : '未知仪器';
+        return sendJson(res, 400, { ok: false, reason: result.reason, message, conflict: result.conflict });
       }
       return sendJson(res, 201, { ok: true, booking: result.booking });
     }
