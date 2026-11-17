@@ -254,6 +254,13 @@ export function createApi(db) {
         AND start <= ? AND end >= ?
       ORDER BY start LIMIT 1`,
   );
+  // 冲突检测：同一仪器、同一天、同为有效状态，且时段重叠（start < 新end 且 end > 新start）。
+  const selectConflict = db.prepare(
+    `SELECT * FROM bookings
+      WHERE instrument_id = ? AND date = ? AND status = 'active'
+        AND start < ? AND end > ?
+      ORDER BY start LIMIT 1`,
+  );
   const selectOpenOnInstrument = db.prepare(
     `SELECT * FROM bookings
       WHERE instrument_id = ? AND status = 'active'
@@ -578,8 +585,15 @@ export function createApi(db) {
       if (!user) return { ok: false, reason: 'applicant_not_registered' };
       const known = selectInstrumentById.get(instrumentId);
       if (!known) return { ok: false, reason: 'unknown_instrument' };
+      const day = String(date || '').trim();
+      const from = String(start || '').trim();
+      const to = String(end || '').trim();
+      if (!/^\d{2}:\d{2}$/.test(from) || !/^\d{2}:\d{2}$/.test(to)) return { ok: false, reason: 'bad_time' };
+      if (from >= to) return { ok: false, reason: 'bad_time_range' };
+      const conflict = selectConflict.get(instrumentId, day, to, from);
+      if (conflict) return { ok: false, reason: 'conflict', conflict: publicBooking(conflict) };
       const id = `BK-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-      insertBooking.run(id, instrumentId, user.name, purpose || '', date, start, end, new Date().toISOString());
+      insertBooking.run(id, instrumentId, user.name, purpose || '', day, from, to, new Date().toISOString());
       return { ok: true, booking: publicBooking(db.prepare('SELECT * FROM bookings WHERE id = ?').get(id)) };
     },
   };
