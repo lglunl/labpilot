@@ -16,6 +16,7 @@ export function phonePage({ title, instrumentName, body }) {
     button:disabled { background: #c5cdc8; color: #5d6a64; }
     .error { padding: 10px 12px; border-radius: 8px; background: #fae8e3; color: #8c3b2a; }
     .ok { color: #0e6e64; font-weight: 650; }
+    code { display: block; margin: 8px 0; padding: 10px 12px; border-radius: 8px; background: #e8ece9; font-size: 13px; word-break: break-all; }
   </style>
 </head>
 <body>
@@ -69,8 +70,18 @@ export function checkedInBody(booking) {
 }
 
 export function checkOutBody(booking) {
+  if (!booking.hasData) {
+    const folder = booking.folderPath
+      ? `<p>本次数据文件夹：<code>${escapeHtml(booking.folderPath)}</code></p>`
+      : '<p>仪器电脑还在准备本次数据文件夹，请稍后再扫一次。</p>';
+    return `
+      <p class="error">无法下机。桌面本次数据文件夹里还没有实验数据。</p>
+      <p>请把实验数据放到桌面本次数据文件夹中，放好后再扫一次这张二维码。</p>
+      ${folder}
+      <button type="button" disabled>下机</button>`;
+  }
   return `
-    <p>${escapeHtml(booking.applicant)} 正在使用这台仪器。下机后，仪器电脑会把本次文件夹里的数据发到下面的邮箱。可以不填。</p>
+    <p>${escapeHtml(booking.applicant)} 正在使用这台仪器。已检测到 ${Number(booking.dataFileCount) || 0} 个数据文件。下机后，仪器电脑会把本次文件夹里的数据发到下面的邮箱。可以不填。</p>
     <form method="post" action="/s/${encodeURIComponent(booking.instrumentId)}/check-out">
       <label for="email">数据接收邮箱</label>
       <input id="email" name="email" type="email" autocomplete="email" placeholder="可以不填">
