@@ -135,7 +135,7 @@ const main = async () => {
   check('C3b', '上机后 /in 显示已上机', C3in.status === 200 && String(C3in.text).includes('已上机'));
 
   const C4 = await scanPage(I.sm, c1);
-  check('C4', '本人再扫显示下机页', C4.status === 200 && String(C4.text).includes('下机后'));
+  check('C4', '无数据时本人再扫提示无法下机', C4.status === 200 && String(C4.text).includes('无法下机'));
   const C5 = await scanPage(I.sm, c3);
   check('C5', '他人扫已占用仪器显示占用', C5.status === 200 && String(C5.text).includes('正在使用这台仪器'));
 
@@ -147,8 +147,17 @@ const main = async () => {
   check('D4', '回报 folderPath 写入且重复不覆盖', d4a.data?.booking?.folderPath === 'D:/Experiment Data/测试文件夹'
     && d4b.data?.booking?.folderPath === 'D:/Experiment Data/测试文件夹', `second="${d4b.data?.booking?.folderPath}"`);
 
+  const C6block = await scanAction(I.sm, 'check-out', c1, { email: 'u1@lab.local' });
+  check('C6n', '无数据时下机被拒', C6block.status === 403 && String(C6block.text).includes('无法下机'), `status=${C6block.status}`);
+
+  const d4c = await deskPost(I.sm, { bookingId: bk1Id, hasData: true, fileCount: 2, bytes: 1024 });
+  check('D4c', '回报 hasData 写入', d4c.data?.booking?.hasData === true && d4c.data?.booking?.dataFileCount === 2,
+    `hasData=${d4c.data?.booking?.hasData} count=${d4c.data?.booking?.dataFileCount}`);
+  const C4b = await scanPage(I.sm, c1);
+  check('C4b', '有数据后本人再扫显示下机页', C4b.status === 200 && String(C4b.text).includes('下机后'));
+
   const C6 = await scanAction(I.sm, 'check-out', c1, { email: 'u1@lab.local' });
-  check('C6', '下机填邮箱 303', C6.status === 303, `status=${C6.status}`);
+  check('C6', '有数据后下机填邮箱 303', C6.status === 303, `status=${C6.status}`);
   const d5 = await deskGet(I.sm);
   check('D5', '下机填邮箱后 desk=need-send', d5.data?.phase === 'need-send' && d5.data?.booking?.sendStatus === 'pending',
     `phase=${d5.data?.phase} sendStatus=${d5.data?.booking?.sendStatus}`);
@@ -166,6 +175,7 @@ const main = async () => {
   const bk2Id = bk2.data?.booking?.id;
   const c1sm2 = cookieToken((await scanLogin(I.sm2, u.u1, 'tester1pass')).setCookie);
   await scanAction(I.sm2, 'check-in', c1sm2);
+  await deskPost(I.sm2, { bookingId: bk2Id, folderPath: 'D:/Experiment Data/测试文件夹2', hasData: true, fileCount: 1, bytes: 10 });
   const C7 = await scanAction(I.sm2, 'check-out', c1sm2, {});
   check('C7', '下机不填邮箱 303', C7.status === 303, `status=${C7.status}`);
   const d8 = await deskGet(I.sm2);
@@ -213,6 +223,7 @@ const main = async () => {
   const e1bkB = await createBooking(I.e1, u.u3, dstr(1), '00:00', '23:59', 'E1-u3');
   const e1c1 = cookieToken((await scanLogin(I.e1, u.u1, 'tester1pass')).setCookie);
   await scanAction(I.e1, 'check-in', e1c1);
+  await deskPost(I.e1, { bookingId: e1bkA.data.booking.id, hasData: true, fileCount: 1, bytes: 10 });
   await scanAction(I.e1, 'check-out', e1c1, { email: 'u1@lab.local' }); // → pending
   const e1pend = await deskGet(I.e1);
   const e1preOk = e1pend.data?.phase === 'need-send';

@@ -480,6 +480,9 @@ const server = http.createServer(async (req, res) => {
         redirectSeeOther(res, `/s/${encodeURIComponent(instrument.id)}`);
         return;
       }
+      if (!open.hasData) {
+        return page(403, '下机', checkOutBody(open));
+      }
       const result = dbApi.recordScan(open.id, 'check-out');
       if (!result.ok) return page(400, '下机', '<p class="error">下机没有成功，请再扫一次。</p>');
       dbApi.setScanMail(open.id, body?.email);

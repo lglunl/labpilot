@@ -101,6 +101,9 @@ export function openDatabase() {
   ensureColumn(db, 'bookings', 'folder_path', 'TEXT');
   ensureColumn(db, 'bookings', 'send_status', 'TEXT');
   ensureColumn(db, 'bookings', 'send_error', 'TEXT');
+  ensureColumn(db, 'bookings', 'data_ready', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'bookings', 'data_file_count', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'bookings', 'data_bytes', 'INTEGER NOT NULL DEFAULT 0');
   seed(db);
   return db;
 }
@@ -233,6 +236,9 @@ function publicBooking(row) {
     folderPath: row.folder_path || '',
     sendStatus: row.send_status || '',
     sendError: row.send_error || '',
+    hasData: Boolean(row.data_ready),
+    dataFileCount: Number(row.data_file_count || 0),
+    dataBytes: Number(row.data_bytes || 0),
   };
 }
 
@@ -489,11 +495,18 @@ export function createApi(db) {
       return { ok: true, booking: publicBooking(selectById.get(id)) };
     },
 
-    reportDesk(instrumentId, { bookingId, folderPath, sendStatus, sendError }) {
+    reportDesk(instrumentId, { bookingId, folderPath, sendStatus, sendError, hasData, fileCount, bytes }) {
       const row = selectById.get(String(bookingId || ''));
       if (!row || row.instrument_id !== instrumentId) return { ok: false, reason: 'not_found' };
       if (folderPath && !row.folder_path) {
         db.prepare('UPDATE bookings SET folder_path = ? WHERE id = ?').run(String(folderPath).slice(0, 500), row.id);
+      }
+      if (hasData !== undefined && hasData !== null && hasData !== '') {
+        const ready = hasData === true || hasData === 1 || hasData === '1' || hasData === 'true';
+        const count = Math.max(0, Number(fileCount) || 0);
+        const size = Math.max(0, Number(bytes) || 0);
+        db.prepare('UPDATE bookings SET data_ready = ?, data_file_count = ?, data_bytes = ? WHERE id = ?')
+          .run(ready ? 1 : 0, count, size, row.id);
       }
       const status = String(sendStatus || '');
       if (status === 'sent' || status === 'failed' || status === 'skipped') {
